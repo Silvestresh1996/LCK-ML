@@ -46,6 +46,7 @@ try:
     import config as cfg
     from oracle_pipeline import OraclePipeline
     from model import MatchPredictor, american_to_decimal, kelly_stake
+    import bet_tracker
     MODULES_OK = True
 except ImportError as _err:
     MODULES_OK = False
@@ -605,6 +606,17 @@ class MatchAnalyzerFrame(ctk.CTkFrame):
         )
         self._metrics_lbl.pack(padx=14, pady=14)
 
+        # Registrar apuesta
+        reg_row = ctk.CTkFrame(results, fg_color="transparent")
+        reg_row.pack(fill="x", pady=(8, 0))
+        self._btn_reg = ctk.CTkButton(
+            reg_row, text="📒  Registrar apuesta de valor",
+            fg_color=C_PANEL, hover_color=C_BORDER, font=("Segoe UI", 12),
+            height=36, state="disabled", command=self._register_bet)
+        self._btn_reg.pack(side="left")
+        self._reg_msg = ctk.CTkLabel(reg_row, text="", font=("Segoe UI", 10), text_color=C_GREEN)
+        self._reg_msg.pack(side="left", padx=12)
+
     def refresh_teams(self):
         names = self.engine.team_names or ["— carga datos primero —"]
         self._cb_a.configure(values=names)
@@ -672,6 +684,42 @@ class MatchAnalyzerFrame(ctk.CTkFrame):
                          text_color=C_MUTED).pack()
             ctk.CTkLabel(col, text=v, font=("Segoe UI", 12, "bold"),
                          text_color=C_TEXT).pack()
+
+        # Habilitar registro solo si hay un lado con valor
+        has_value = r["kelly_a"].get("is_value") or r["kelly_b"].get("is_value")
+        self._reg_msg.configure(text="")
+        self._btn_reg.configure(
+            state="normal" if has_value else "disabled",
+            text="📒  Registrar apuesta de valor" if has_value else "Sin valor para registrar")
+
+    def _register_bet(self):
+        r = self._result
+        if not r:
+            return
+        ka, kb = r["kelly_a"], r["kelly_b"]
+        # Elige el lado con valor (o el de mayor edge)
+        pick_a = ka.get("is_value") and ka.get("edge_pct", -99) >= kb.get("edge_pct", -99)
+        if not ka.get("is_value") and kb.get("is_value"):
+            pick_a = False
+        elif ka.get("is_value") and not kb.get("is_value"):
+            pick_a = True
+
+        k    = ka if pick_a else kb
+        pick = r["name_a"] if pick_a else r["name_b"]
+        prob = r["prob_a"] if pick_a else r["prob_b"]
+        odd  = r["odd_a_am"] if pick_a else r["odd_b_am"]
+        dec  = r["dec_a"] if pick_a else r["dec_b"]
+        side_a = self._side_var.get()           # lado del equipo A
+        lado = side_a if pick_a else ("red" if side_a == "blue" else "blue")
+
+        bet_tracker.add_bet(
+            liga=self.engine.league_name.split("—")[0].strip(),
+            partido=f"{r['name_a']} vs {r['name_b']}",
+            pick=pick, lado=lado, prob_modelo=prob, momio=odd,
+            cuota=dec, edge_pct=k.get("edge_pct", 0), stake_mxn=k.get("stake_mxn", 0),
+        )
+        self._reg_msg.configure(text=f"✓ Registrada: {pick} (${k.get('stake_mxn',0):,.0f})")
+        self._btn_reg.configure(state="disabled", text="Registrada ✓")
 
 
 class _KellyCard(ctk.CTkFrame):
@@ -939,6 +987,129 @@ class _MatchInputDialog(ctk.CTkToplevel):
 
 
 # ═══════════════════════════════════════════════════════════════
+#  FRAME: REGISTRO DE APUESTAS
+# ═══════════════════════════════════════════════════════════════
+class BetLogFrame(ctk.CTkFrame):
+    """Historial de apuestas: marca resultados y mide tu rendimiento real."""
+
+    def __init__(self, master, engine: PredictionEngine, **kw):
+        super().__init__(master, fg_color="transparent", **kw)
+        self.engine = engine
+        self._build()
+
+    def _build(self):
+        ctk.CTkLabel(self, text="Registro de apuestas",
+                     font=("Segoe UI", 20, "bold"), text_color=C_TEXT
+                     ).pack(anchor="w", pady=(0, 4))
+        ctk.CTkLabel(self, text="Marca cada apuesta como ganada o perdida para medir si el "
+                                "sistema te da ganancias de verdad.",
+                     font=("Segoe UI", 11), text_color=C_MUTED).pack(anchor="w", pady=(0, 12))
+
+        # ── Resumen (tarjetas) ──
+        self._sumrow = ctk.CTkFrame(self, fg_color="transparent")
+        self._sumrow.pack(fill="x", pady=(0, 12))
+        self._sumrow.grid_columnconfigure((0, 1, 2, 3, 4), weight=1)
+        self._c_bets    = KPICard(self._sumrow, "Apuestas",        "0", "registradas")
+        self._c_win     = KPICard(self._sumrow, "Aciertos",        "—", "de resueltas")
+        self._c_profit  = KPICard(self._sumrow, "Ganancia neta",   "$0", "MXN", accent=True)
+        self._c_yield   = KPICard(self._sumrow, "Yield",           "—", "ganancia / arriesgado", accent=True)
+        self._c_pending = KPICard(self._sumrow, "Pendientes",      "0", "sin resultado")
+        for i, c in enumerate([self._c_bets, self._c_win, self._c_profit, self._c_yield, self._c_pending]):
+            c.grid(row=0, column=i, sticky="nsew", padx=(0, 8 if i < 4 else 0))
+
+        # ── Tabla ──
+        self._scroll = ctk.CTkScrollableFrame(self, fg_color=C_CARD, corner_radius=12)
+        self._scroll.pack(fill="both", expand=True)
+
+        hdr = ctk.CTkFrame(self._scroll, fg_color="transparent")
+        hdr.pack(fill="x", padx=10, pady=(10, 4))
+        for text, w in [("Fecha", 96), ("Partido", 190), ("Apuesta", 120), ("Cuota", 60),
+                        ("Stake", 70), ("Resultado", 200), ("Ganancia", 90), ("", 30)]:
+            ctk.CTkLabel(hdr, text=text, font=("Segoe UI", 10, "bold"),
+                         text_color=C_MUTED, width=w, anchor="w").pack(side="left", padx=4)
+        ctk.CTkFrame(self._scroll, fg_color=C_BORDER, height=1).pack(fill="x", padx=10)
+
+        self._rows_frame = ctk.CTkFrame(self._scroll, fg_color="transparent")
+        self._rows_frame.pack(fill="both", expand=True)
+
+        self._empty_lbl = ctk.CTkLabel(self._rows_frame,
+                                       text="Aún no hay apuestas. Regístralas desde Match Analyzer.",
+                                       font=("Segoe UI", 11), text_color=C_MUTED)
+
+    def refresh(self):
+        for w in self._rows_frame.winfo_children():
+            w.destroy()
+
+        bets = bet_tracker.all_bets()
+        s = bet_tracker.summary()
+        self._c_bets.update_value(str(s["n_total"]), "registradas")
+        self._c_win.update_value(
+            f"{s['n_won']}/{s['n_settled']}" if s["n_settled"] else "—",
+            f"{s['win_rate']*100:.0f}% acierto" if s["n_settled"] else "sin resueltas")
+        col_p = C_GREEN if s["profit"] >= 0 else C_RED
+        self._c_profit.update_value(f"${s['profit']:+,.0f}", "MXN")
+        self._c_profit._vl.configure(text_color=col_p)
+        self._c_yield.update_value(f"{s['yield_pct']:+.1f}%" if s["n_settled"] else "—",
+                                   "ganancia / arriesgado")
+        self._c_yield._vl.configure(text_color=col_p if s["n_settled"] else C_TEXT)
+        self._c_pending.update_value(str(s["n_pending"]), "sin resultado")
+
+        if not bets:
+            self._empty_lbl.pack(pady=30)
+            return
+
+        for b in bets:
+            self._render_row(b)
+
+    def _render_row(self, b: dict):
+        estado = b.get("estado", "pendiente")
+        line = ctk.CTkFrame(self._rows_frame, fg_color=C_PANEL, corner_radius=8)
+        line.pack(fill="x", padx=10, pady=3)
+
+        def lbl(text, w, color=C_TEXT):
+            ctk.CTkLabel(line, text=text, font=("Segoe UI", 11), text_color=color,
+                         width=w, anchor="w").pack(side="left", padx=4, pady=7)
+
+        lbl(b.get("fecha", "")[:10], 96, C_MUTED)
+        lbl(b.get("partido", "")[:24], 190)
+        lbl(f"{b.get('pick','')[:10]} {b.get('cuota','')}", 120, C_GOLD)
+        lbl(b.get("cuota", ""), 60)
+        lbl(f"${float(b.get('stake_mxn',0)):,.0f}", 70)
+
+        # Botones de resultado
+        seg = ctk.CTkFrame(line, fg_color="transparent", width=200)
+        seg.pack(side="left", padx=4)
+        for est, txt, col in [("ganada", "✓ Ganó", C_GREEN),
+                              ("perdida", "✗ Perdió", C_RED),
+                              ("pendiente", "Pend.", C_MUTED)]:
+            active = (estado == est)
+            ctk.CTkButton(
+                seg, text=txt, width=58, height=26,
+                font=("Segoe UI", 10, "bold" if active else "normal"),
+                fg_color=col if active else C_CARD,
+                text_color=C_DARK2 if active else C_MUTED,
+                hover_color=col,
+                command=lambda i=b["id"], e=est: self._set(i, e),
+            ).pack(side="left", padx=1)
+
+        gan = float(b.get("ganancia_mxn", 0) or 0)
+        gcol = C_GREEN if gan > 0 else (C_RED if gan < 0 else C_MUTED)
+        lbl(f"${gan:+,.0f}" if estado != "pendiente" else "—", 90, gcol)
+
+        ctk.CTkButton(line, text="✕", width=26, height=26, fg_color=C_CARD,
+                      hover_color=C_RED, text_color=C_MUTED,
+                      command=lambda i=b["id"]: self._delete(i)).pack(side="left", padx=2)
+
+    def _set(self, bet_id, estado):
+        bet_tracker.set_estado(bet_id, estado)
+        self.refresh()
+
+    def _delete(self, bet_id):
+        bet_tracker.delete_bet(bet_id)
+        self.refresh()
+
+
+# ═══════════════════════════════════════════════════════════════
 #  FRAME 4: SETTINGS
 # ═══════════════════════════════════════════════════════════════
 class SettingsFrame(ctk.CTkFrame):
@@ -1128,6 +1299,7 @@ class PredictionOSApp(ctk.CTk):
             ("dashboard",  "📊  Dashboard",     self._go_dashboard),
             ("analyzer",   "⚔️   Match Analyzer", self._go_analyzer),
             ("valuebets",  "💰  Value Bets",     self._go_valuebets),
+            ("registro",   "📒  Registro",       self._go_registro),
             ("settings",   "⚙️   Configuración",  self._go_settings),
         ]
         self._nav_btns: dict[str, ctk.CTkButton] = {}
@@ -1188,6 +1360,7 @@ class PredictionOSApp(ctk.CTk):
             "dashboard": DashboardFrame(self._content, self.engine),
             "analyzer":  MatchAnalyzerFrame(self._content, self.engine),
             "valuebets": ValueBetsFrame(self._content, self.engine),
+            "registro":  BetLogFrame(self._content, self.engine),
             "settings":  SettingsFrame(self._content, self.engine,
                                         on_league_change=self._on_sidebar_league_change),
         }
@@ -1238,6 +1411,7 @@ class PredictionOSApp(ctk.CTk):
     def _go_dashboard(self):  self._show("dashboard")
     def _go_analyzer(self):   self._show("analyzer")
     def _go_valuebets(self):  self._show("valuebets")
+    def _go_registro(self):   self._frames["registro"].refresh(); self._show("registro")
     def _go_settings(self):   self._show("settings")
 
     # ─────────────────────────────────────────

@@ -1,3 +1,18 @@
+# Secretos — nunca subir la API key
+secrets_local.py
+api_key.txt
+.env
 lck_config.py
+
+# Artefactos de build (PyInstaller)
+build/
+dist/
+*.spec
+
+# Modelos entrenados / caché
+*.joblib
+*.pkl
+
+# Python
 __pycache__/
 *.pyc

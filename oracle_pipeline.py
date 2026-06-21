@@ -42,8 +42,19 @@ log = logging.getLogger("OraclePipeline")
 _OE_FOLDER_ID = "1gLSw0RLjBbtaNy0dgnGQDAZOHIgCe-HH"
 _UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0 Safari/537.36"}
 
-# Ligas mayores: en modo GLOBAL solo se muestran equipos de estas regiones.
+# Ligas domésticas mayores (cada equipo acumula muchos partidos aquí).
 MAJOR_LEAGUES = {"LCK", "LPL", "LEC", "LCS", "LCP", "LJL", "CBLOL", "VCS"}
+
+# Torneos INTERNACIONALES: son los que enlazan regiones (un coreano vs. un
+# chino solo pasa aquí). Sin ellos, el Elo de cada región quedaría sin escala
+# común. Detectados en los datos 2026 de Oracle's Elixir:
+#   EWC = Esports World Cup, FST = First Stand, Asia Master, AC.
+INTERNATIONAL_LEAGUES = {"EWC", "FST", "Asia Master", "AC"}
+
+# Modo GLOBAL = ligas mayores + torneos internacionales (excluye ligas menores
+# y académicas). Da un Elo entre regiones calibrado por los enfrentamientos
+# internacionales reales.
+GLOBAL_LEAGUES = MAJOR_LEAGUES | INTERNATIONAL_LEAGUES
 
 # Columnas que necesitamos del CSV (165 en total — leemos solo estas por rapidez).
 _USECOLS = [
@@ -138,11 +149,12 @@ class OraclePipeline:
             return pd.DataFrame()
 
         df = df[df["participantid"].isin([100, 200])].copy()
-        if self.league_code != "GLOBAL":
+        if self.league_code == "GLOBAL":
+            # Modo internacional: ligas mayores + torneos que enlazan regiones.
+            df = df[df["league"].isin(GLOBAL_LEAGUES)].copy()
+        else:
             # Modo liga: solo esa liga.
             df = df[df["league"] == self.league_code].copy()
-        # Modo GLOBAL: se usan TODAS las ligas para un Elo entre regiones
-        # (calibrado por torneos internacionales: First Stand, EWC, MSI…).
         if df.empty:
             log.warning(f"Sin filas para {self.league_code} en {self.year}.")
             return df

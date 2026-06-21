@@ -74,14 +74,25 @@ CURRENT_YEAR = datetime.now().year   # Dinámico — nunca hardcoded
 
 
 # ─────────────────────────────────────────────
-#  🏆  LIGAS SOPORTADAS  (nombre → ID PandaScore)
+#  🏆  LIGAS SOPORTADAS  (nombre visible → código de liga en Oracle's Elixir)
+#      El primer token del nombre DEBE ser el código de Oracle's Elixir.
+#      Todas viven en el mismo CSV anual: cambiar de liga no re-descarga nada.
 # ─────────────────────────────────────────────
-LEAGUES: dict[str, int] = {
-    "LCK  — Korea":      293,
-    "LPL  — China":      290,
-    "LEC  — Europe":    4197,
-    "LCS  — N. America": 4198,
+LEAGUES: dict[str, str] = {
+    "LCK  — Corea":          "LCK",
+    "LPL  — China":          "LPL",
+    "LEC  — Europa":         "LEC",
+    "LCS  — Norteamérica":   "LCS",
+    "LCP  — Asia-Pacífico":  "LCP",
+    "LJL  — Japón":          "LJL",
+    "CBLOL — Brasil":        "CBLOL",
+    "VCS  — Vietnam":        "VCS",
+    "LFL  — Francia":        "LFL",
+    "EM  — EMEA Masters":    "EM",
 }
+DEFAULT_LEAGUE_NAME = "LCK  — Corea"
+
+# Compatibilidad con universal_pipeline.py (cliente PandaScore, no usado por defecto)
 DEFAULT_LEAGUE_ID = 293
 
 

@@ -93,8 +93,8 @@ class PredictionEngine:
 
     def __init__(self):
         self.api_key        = cfg.PANDASCORE_API_KEY if MODULES_OK else ""
-        self.league_id      = cfg.DEFAULT_LEAGUE_ID if MODULES_OK else 293
-        self.league_name    = "LCK — Korea"
+        self.league_name    = cfg.DEFAULT_LEAGUE_NAME if MODULES_OK else "LCK  — Corea"
+        self.league_code    = LEAGUES.get(self.league_name, "LCK")
         self.pipeline       = None
         self.predictor: "MatchPredictor | None" = None
         self.stats_dict: dict  = {}          # {team_name → stats dict}
@@ -106,8 +106,8 @@ class PredictionEngine:
         self.kelly_frac: float = getattr(cfg, "KELLY_FRACTION", 0.25) if MODULES_OK else 0.25
 
     def set_league(self, name: str):
-        self.league_id   = LEAGUES.get(name, 293)
         self.league_name = name
+        self.league_code = LEAGUES.get(name, name.split()[0].upper())
 
     def set_api_key(self, key: str):
         """Actualiza la API key en tiempo de ejecución sin reiniciar."""
@@ -138,7 +138,7 @@ class PredictionEngine:
 
         df_matches = pd.DataFrame()
         df_stats = pd.DataFrame()
-        league_code = self.league_name.split()[0].upper()   # "LCK — Korea" → "LCK"
+        league_code = self.league_code   # código de Oracle's Elixir (ej. "LCK")
 
         try:
             pipeline = OraclePipeline(league_code=league_code)
@@ -481,8 +481,7 @@ class DashboardFrame(ctk.CTkFrame):
         self._c_patch.update_value(engine.current_patch or "N/A", "parche activo")
         self._chart.update(engine.df_stats)
 
-        ln = next((k for k, v in LEAGUES.items() if v == engine.league_id), "—")
-        self._rows["Liga activa"].configure(text=ln.split("—")[0].strip())
+        self._rows["Liga activa"].configure(text=engine.league_name.split("—")[0].strip())
         self._rows["Parche"].configure(text=engine.current_patch or "—")
         self._rows["Modo ML"].configure(text=m.get("mode", "—"))
         self._rows["Features"].configure(text=str(m.get("features", "—")))

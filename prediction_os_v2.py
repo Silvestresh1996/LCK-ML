@@ -44,7 +44,7 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     import config as cfg
-    from universal_pipeline import UniversalPipeline, get_demo_stats
+    from universal_pipeline import UniversalPipeline
     from model import MatchPredictor, american_to_decimal, kelly_stake
     MODULES_OK = True
 except ImportError as _err:
@@ -102,7 +102,6 @@ class PredictionEngine:
         self.current_patch: str = ""
         self.model_metrics: dict = {}
         self.df_stats: pd.DataFrame = pd.DataFrame()
-        self.is_demo: bool     = False       # True si se usaron datos de demostración
         self.bankroll: float   = getattr(cfg, "BANKROLL", 1000.0) if MODULES_OK else 1000.0
         self.kelly_frac: float = getattr(cfg, "KELLY_FRACTION", 0.25) if MODULES_OK else 0.25
 
@@ -139,10 +138,15 @@ class PredictionEngine:
             cb(f"ERROR: módulo faltante → {_IMPORT_MSG}", 1.0)
             return False
 
-        self.is_demo = False
+        if not self.api_key:
+            cb("ERROR: falta la API Key — ponla en Configuración.", 1.0)
+            return False
+
         df_matches = pd.DataFrame()
         df_stats = pd.DataFrame()
 
+        # Datos reales o error claro. NUNCA datos falsos: apostarías sobre
+        # números inventados. Si la API falla, el sistema se detiene.
         try:
             pipeline = UniversalPipeline(api_key=self.api_key, league_id=self.league_id)
 
@@ -158,7 +162,7 @@ class PredictionEngine:
             # ── 3. Partidas (resultados reales) ──
             cb("Descargando partidas…", 0.35)
             df_matches = pipeline.get_matches(limit=100)
-            cb(f"{len(df_matches)} partidas", 0.55)
+            cb(f"{len(df_matches)} partidas reales", 0.55)
 
             # ── 4. KPIs ──
             if not df_matches.empty:
@@ -168,20 +172,17 @@ class PredictionEngine:
                 )
             self.pipeline = pipeline
         except Exception as exc:
-            cb(f"Error de conexión: {exc}", 0.55)
+            cb(f"ERROR de conexión: {exc}", 1.0)
+            return False
 
-        # ── Fallback a datos de demostración ──
         if df_stats.empty:
-            cb("Sin datos de la API — usando modo demostración…", 0.60)
-            self.is_demo = True
-            df_stats = get_demo_stats(self.league_name)
-            df_matches = pd.DataFrame()   # sin partidos reales → modelo fallback
-            if not self.current_patch:
-                self.current_patch = "demo"
+            cb("ERROR: la API no devolvió datos utilizables. Revisa tu "
+               "API Key, tu plan o la liga seleccionada.", 1.0)
+            return False
 
         cb(f"KPIs listos: {len(df_stats)} equipos", 0.72)
 
-        # ── 5. Entrenamiento ──
+        # ── 5. Entrenamiento (sobre resultados reales) ──
         cb("Entrenando modelo…", 0.82)
         predictor = MatchPredictor()
         try:
@@ -202,8 +203,7 @@ class PredictionEngine:
         }
         self.team_names = sorted(self.stats_dict.keys())
 
-        suffix = "  (modo demo)" if self.is_demo else ""
-        cb(f"✅  Sistema listo{suffix}", 1.0)
+        cb("✅  Sistema listo", 1.0)
         return True
 
     # ─────────────────────────────────────────
@@ -493,10 +493,7 @@ class DashboardFrame(ctk.CTkFrame):
             auc_str,
             f"modo {m.get('mode', '?')}"
         )
-        patch_txt = engine.current_patch or "N/A"
-        if engine.is_demo:
-            patch_txt += "  ·  DEMO"
-        self._c_patch.update_value(patch_txt, "parche activo")
+        self._c_patch.update_value(engine.current_patch or "N/A", "parche activo")
         self._chart.update(engine.df_stats)
 
         ln = next((k for k, v in LEAGUES.items() if v == engine.league_id), "—")
@@ -1063,7 +1060,16 @@ class SettingsFrame(ctk.CTkFrame):
         key = self._e_key.get().strip()
         if key:
             self.engine.set_api_key(key)
-            self._status.configure(text="API Key actualizada.", text_color=C_GREEN)
+            try:
+                cfg.save_api_key(key)
+                cfg.PANDASCORE_API_KEY = key
+                self._status.configure(
+                    text="API Key guardada. Pulsa Cargar para actualizar.",
+                    text_color=C_GREEN)
+            except Exception as exc:
+                self._status.configure(
+                    text=f"API Key aplicada (no se pudo guardar: {exc})",
+                    text_color=C_GOLD)
 
     def _on_league_select(self, choice: str):
         self.engine.set_league(choice)

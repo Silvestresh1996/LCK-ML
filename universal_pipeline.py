@@ -305,11 +305,9 @@ class UniversalPipeline:
         """
         Construye {team_id (int) → team_name (str)} para la liga activa.
 
-        Estrategia de dos pasos (garantiza máxima cobertura):
-          Paso 1 → /lol/teams?filter[league_id]=X
-                   (más completo, puede devolver 403 en plan Free)
-          Paso 2 → /lol/matches (siempre funciona en plan Free):
-                   extrae names del campo opponents de cada partida
+        Los nombres se extraen del campo `opponents` de /lol/matches, que
+        siempre funciona en el plan Free. (No se usa /lol/teams porque ese
+        endpoint no está disponible en el plan Free y solo genera ruido.)
 
         El caché resultante se usa en build_team_stats() para sustituir
         IDs numéricos por nombres legibles en todas las filas del DataFrame.
@@ -320,21 +318,6 @@ class UniversalPipeline:
         log.info(f"[fetch_team_names] liga={self.league_id}")
         mapping: dict[int, str] = {}
 
-        # ── Paso 1: /lol/teams (intento, puede fallar en plan Free) ──
-        raw_teams = self._get(
-            "/lol/teams",
-            params={"filter[league_id]": self.league_id, "per_page": 50},
-            max_pages=2,
-        )
-        for t in raw_teams:
-            tid  = t.get("id")
-            name = (t.get("name") or t.get("acronym") or "").strip()
-            if tid and name:
-                mapping[int(tid)] = name
-
-        log.info(f"  /lol/teams → {len(mapping)} equipos")
-
-        # ── Paso 2: /lol/matches (siempre ejecutado para completar) ──
         raw_matches = self._get(
             "/lol/matches",
             params={
@@ -366,6 +349,23 @@ class UniversalPipeline:
             progress_cb(f"{len(mapping)} equipos encontrados")
 
         return mapping
+
+    @staticmethod
+    def _extract_patch(match: dict) -> str:
+        """
+        Extrae el nombre del parche de un partido.
+
+        PandaScore devuelve `videogame_version` como dict
+        {'name': '16.11.1', 'current': bool} (a veces como string).
+        Retorna "" si no hay un parche válido.
+        """
+        v = match.get("videogame_version")
+        if isinstance(v, dict):
+            v = v.get("name")
+        if not v:
+            return ""
+        s = str(v).strip()
+        return s if s not in ("", "null", "None") else ""
 
     def get_team_name(self, tid) -> str:
         """
@@ -405,25 +405,30 @@ class UniversalPipeline:
         )
 
         if not raw:
-            log.warning("  Sin partidas para detectar parche. Sin filtro de parche.")
+            log.warning("  Sin partidas para detectar parche.")
             self._current_patch = ""
             return ""
 
-        patches = []
+        # Preferir un parche marcado como 'current' por PandaScore.
         for m in raw:
             v = m.get("videogame_version")
-            if v and str(v).strip() not in ("", "null", "None"):
-                p_str = str(v).strip()
-                if PatchManager.is_valid(p_str):
-                    patches.append(p_str)
+            if isinstance(v, dict) and v.get("current"):
+                name = self._extract_patch(m)
+                if PatchManager.is_valid(name):
+                    self._current_patch = name
+                    log.info(f"  Parche actual (current=True): {name}")
+                    if progress_cb:
+                        progress_cb(f"Parche activo: {name}")
+                    return name
 
+        patches = [p for p in (self._extract_patch(m) for m in raw)
+                   if PatchManager.is_valid(p)]
         if not patches:
-            log.warning("  Partidas sin versión válida. Sin filtro de parche.")
+            log.warning("  Partidas sin versión válida.")
             self._current_patch = ""
             return ""
 
-        # El parche "actual" = el más reciente visto (no el más frecuente,
-        # que podría ser un parche viejo con más partidas acumuladas).
+        # Si ninguno es 'current', usar el más reciente por número de versión.
         detected = max(patches, key=lambda p: PatchManager.parse(p))
         self._current_patch = detected
         log.info(f"  Parche detectado: {detected}")
@@ -474,28 +479,26 @@ class UniversalPipeline:
 
         Args:
             limit:      Máximo de partidas a descargar (se pagina en bloques de 50)
-            min_patch:  Parche mínimo incluido (ej: "26.08").
-                        None → auto-detecta como current_patch - 1.
-                        "00.00" → sin filtro (todos los parches).
+            min_patch:  Parche mínimo incluido (ej: "16.10").
+                        None → sin filtro (usa las últimas `limit` partidas).
+                              Más confiable: evita datasets vacíos cuando hay
+                              pocos partidos en el parche más reciente.
+                        "16.10" → solo partidas de ese parche en adelante.
             progress_cb: Función callback(str) para actualizar la UI
 
         Returns:
             pd.DataFrame con columnas:
               match_id, team_a_id, team_b_id, winner_id, patch, begin_at
         """
-        # ── Determinar parche mínimo ───────────────────────────
+        # ── Por defecto NO filtramos por parche ────────────────
+        # Una sola split tiene partidos repartidos en muchos parches; filtrar
+        # al parche actual dejaría muy pocos datos. Usar las últimas `limit`
+        # partidas da un dataset estable para estimar la fuerza de cada equipo.
         if min_patch is None:
-            if self._current_patch and PatchManager.is_valid(self._current_patch):
-                min_patch = PatchManager.subtract(self._current_patch, 1)
-                log.info(f"  [get_matches] min_patch auto: {min_patch} (current={self._current_patch})")
-            else:
-                log.info("  [get_matches] Detectando parche para calcular ventana…")
-                detected  = self.detect_current_patch(progress_cb=progress_cb)
-                min_patch = PatchManager.subtract(detected, 1) if PatchManager.is_valid(detected) else "00.00"
-                log.info(f"  [get_matches] min_patch auto: {min_patch}")
+            min_patch = "00.00"
 
         if progress_cb:
-            progress_cb(f"Descargando partidas (parche ≥ {min_patch})…")
+            progress_cb("Descargando partidas…")
 
         # ── Descarga paginada ──────────────────────────────────
         per_page  = min(limit, 50)
@@ -544,8 +547,7 @@ class UniversalPipeline:
             if name_b:
                 self._team_cache[int(tid_b)] = name_b
 
-            patch_raw = m.get("videogame_version")
-            patch_str = str(patch_raw).strip() if patch_raw else "unknown"
+            patch_str = self._extract_patch(m) or "unknown"
 
             rows.append({
                 "match_id":  m.get("id"),

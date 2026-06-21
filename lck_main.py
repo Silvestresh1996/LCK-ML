@@ -26,7 +26,7 @@ import logging
 import pandas as pd
 
 import config
-from universal_pipeline import UniversalPipeline, get_demo_stats
+from universal_pipeline import UniversalPipeline
 from model import MatchPredictor, american_to_decimal, kelly_stake
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
@@ -85,11 +85,15 @@ def parse_american(raw: str):
 
 
 def load_and_train(league_id: int) -> tuple[dict, MatchPredictor, str]:
-    """Descarga, calcula KPIs y entrena. Cae a demo si no hay datos."""
+    """Descarga datos reales, calcula KPIs y entrena. Sin datos → aborta."""
     league_name = next((n for n, i in config.LEAGUES.items() if i == league_id), f"Liga {league_id}")
     print(f"{CYAN}{LINE}\n  Cargando datos de {league_name}…\n{CYAN}{LINE}{RESET}")
 
-    df_matches, df_stats, is_demo = pd.DataFrame(), pd.DataFrame(), False
+    if not config.PANDASCORE_API_KEY:
+        print(f"  {RED}Falta la API Key. Define PANDASCORE_API_KEY o secrets_local.py.{RESET}")
+        sys.exit(1)
+
+    df_matches, df_stats = pd.DataFrame(), pd.DataFrame()
     try:
         pipe = UniversalPipeline(league_id=league_id)
         pipe.detect_current_patch()
@@ -99,18 +103,19 @@ def load_and_train(league_id: int) -> tuple[dict, MatchPredictor, str]:
             df_stats = pipe.build_team_stats(df_matches, min_games=config.MIN_GAMES_PER_TEAM)
     except Exception as e:
         print(f"  {RED}Error de conexión: {e}{RESET}")
+        sys.exit(1)
 
     if df_stats.empty:
-        print(f"  {RED}Sin datos de la API — usando modo demostración.{RESET}")
-        df_stats, df_matches, is_demo = get_demo_stats(league_name), pd.DataFrame(), True
+        print(f"  {RED}La API no devolvió datos utilizables. Revisa tu API Key, "
+              f"tu plan o la liga.{RESET}")
+        sys.exit(1)
 
     predictor = MatchPredictor()
     metrics = predictor.train(df_stats, df_matches)
     auc = metrics.get("auc_mean")
     auc_str = f"{auc:.3f}" if isinstance(auc, (int, float)) else "N/A"
     print(f"  ✅ Modelo: modo={metrics.get('mode')} | AUC={auc_str} | "
-          f"partidos reales={metrics.get('matches', 0)}"
-          + ("  (DEMO)" if is_demo else ""))
+          f"partidos reales={metrics.get('matches', 0)}")
 
     stats_dict = {row["team_name"]: row for row in df_stats.to_dict("records")}
     return stats_dict, predictor, league_name

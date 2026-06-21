@@ -17,22 +17,54 @@ Para configurarla (elige una):
 from __future__ import annotations
 
 import os
+import sys
 from datetime import datetime
 
 
 # ─────────────────────────────────────────────
-#  🔑  API KEY (sin hardcode)
+#  🔑  API KEY (sin hardcode, segura para .exe)
 # ─────────────────────────────────────────────
+def _app_dir() -> str:
+    """Directorio de la app: junto al .exe si está empaquetado, o al fuente."""
+    if getattr(sys, "frozen", False):          # ejecutable PyInstaller
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+# Archivo de texto plano (una línea) junto a la app. NUNCA se empaqueta
+# dentro del .exe, así que la llave no queda extraíble del binario.
+KEY_FILE = os.path.join(_app_dir(), "api_key.txt")
+
+
 def get_api_key() -> str:
-    """Resuelve la API key desde el entorno o secrets_local.py."""
+    """
+    Resuelve la API key en orden:
+      1. Variable de entorno PANDASCORE_API_KEY
+      2. Archivo api_key.txt junto a la app
+      3. secrets_local.py (solo en modo desarrollo)
+    """
     key = os.getenv("PANDASCORE_API_KEY", "").strip()
     if key:
         return key
+    if os.path.exists(KEY_FILE):
+        try:
+            with open(KEY_FILE, encoding="utf-8") as f:
+                key = f.read().strip()
+            if key:
+                return key
+        except OSError:
+            pass
     try:
         import secrets_local  # type: ignore
         return str(getattr(secrets_local, "PANDASCORE_API_KEY", "")).strip()
     except ImportError:
         return ""
+
+
+def save_api_key(key: str) -> None:
+    """Guarda la API key en api_key.txt para que persista entre sesiones."""
+    with open(KEY_FILE, "w", encoding="utf-8") as f:
+        f.write(key.strip())
 
 
 PANDASCORE_API_KEY  = get_api_key()

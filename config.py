@@ -89,6 +89,7 @@ LEAGUES: dict[str, str] = {
     "VCS  — Vietnam":        "VCS",
     "LFL  — Francia":        "LFL",
     "EM  — EMEA Masters":    "EM",
+    "GLOBAL — Internacional (MSI/Worlds)": "GLOBAL",
 }
 DEFAULT_LEAGUE_NAME = "LCK  — Corea"
 

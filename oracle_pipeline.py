@@ -42,6 +42,9 @@ log = logging.getLogger("OraclePipeline")
 _OE_FOLDER_ID = "1gLSw0RLjBbtaNy0dgnGQDAZOHIgCe-HH"
 _UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0 Safari/537.36"}
 
+# Ligas mayores: en modo GLOBAL solo se muestran equipos de estas regiones.
+MAJOR_LEAGUES = {"LCK", "LPL", "LEC", "LCS", "LCP", "LJL", "CBLOL", "VCS"}
+
 # Columnas que necesitamos del CSV (165 en total — leemos solo estas por rapidez).
 _USECOLS = [
     "gameid", "league", "year", "date", "participantid", "side", "result",
@@ -134,10 +137,14 @@ class OraclePipeline:
             log.error(f"No se pudo leer el CSV: {e}")
             return pd.DataFrame()
 
-        df = df[(df["league"] == self.league_code) &
-                (df["participantid"].isin([100, 200]))].copy()
+        df = df[df["participantid"].isin([100, 200])].copy()
+        if self.league_code != "GLOBAL":
+            # Modo liga: solo esa liga.
+            df = df[df["league"] == self.league_code].copy()
+        # Modo GLOBAL: se usan TODAS las ligas para un Elo entre regiones
+        # (calibrado por torneos internacionales: First Stand, EWC, MSI…).
         if df.empty:
-            log.warning(f"Sin filas para la liga {self.league_code} en {self.year}.")
+            log.warning(f"Sin filas para {self.league_code} en {self.year}.")
             return df
 
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
@@ -202,10 +209,20 @@ class OraclePipeline:
         if games.empty:
             return pd.DataFrame()
 
+        # En modo GLOBAL, mostrar solo equipos de ligas mayores (para que el
+        # selector no tenga cientos de equipos de ligas menores).
+        global_major = None
+        if self.league_code == "GLOBAL":
+            home = games.groupby("teamid")["league"].agg(
+                lambda s: s.value_counts().idxmax())
+            global_major = set(home[home.isin(MAJOR_LEAGUES)].index)
+
         rows = []
         for tid, g in games.groupby("teamid"):
             n = len(g)
             if n < min_games:
+                continue
+            if global_major is not None and tid not in global_major:
                 continue
             blue = g[g["side"] == "Blue"]
             red = g[g["side"] == "Red"]

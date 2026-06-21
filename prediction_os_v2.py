@@ -114,6 +114,51 @@ class PredictionEngine:
         """Actualiza la API key en tiempo de ejecución sin reiniciar."""
         self.api_key = key.strip()
 
+    def fetch_upcoming_matches(self, max_results: int = 40) -> list[dict]:
+        """
+        Trae los PRÓXIMOS partidos (calendario) y deja solo aquellos cuyos dos
+        equipos pertenecen a la liga activa, emparejando por nombre con los
+        equipos de Oracle's Elixir. Usa PandaScore (status not_started).
+
+        Requiere API Key de PandaScore (solo para el calendario; los datos y el
+        modelo siguen siendo de Oracle's Elixir). Sin key o sin partidos → [].
+        """
+        if not self.api_key or not self.team_names:
+            return []
+        import re
+        import requests
+
+        def norm(s: str) -> str:
+            return re.sub(r"[^a-z0-9]", "", str(s).lower())
+
+        team_by_norm = {norm(n): n for n in self.team_names}
+        try:
+            s = requests.Session()
+            s.headers.update({"Authorization": f"Bearer {self.api_key}",
+                              "Accept": "application/json"})
+            r = s.get("https://api.pandascore.co/lol/matches",
+                      params={"filter[status]": "not_started", "sort": "begin_at",
+                              "per_page": 50}, timeout=15)
+            data = r.json() if r.ok else []
+        except Exception:
+            return []
+
+        out, seen = [], set()
+        for m in data if isinstance(data, list) else []:
+            opps = m.get("opponents", [])
+            if len(opps) < 2:
+                continue
+            na = (opps[0].get("opponent") or {}).get("name")
+            nb = (opps[1].get("opponent") or {}).get("name")
+            oa = team_by_norm.get(norm(na)) if na else None
+            ob = team_by_norm.get(norm(nb)) if nb else None
+            if oa and ob and oa != ob and (oa, ob) not in seen:
+                seen.add((oa, ob))
+                out.append({"name_a": oa, "name_b": ob, "begin_at": m.get("begin_at", "")})
+                if len(out) >= max_results:
+                    break
+        return out
+
     # ─────────────────────────────────────────
     #  Pipeline completo (corre en thread)
     # ─────────────────────────────────────────
@@ -790,9 +835,14 @@ class ValueBetsFrame(ctk.CTkFrame):
         # Toolbar
         toolbar = ctk.CTkFrame(self, fg_color="transparent")
         toolbar.pack(fill="x", pady=(0, 10))
-        ctk.CTkButton(toolbar, text="+ Agregar partido",
+        ctk.CTkButton(toolbar, text="📅  Cargar partidos del día",
                       fg_color=C_GOLD, text_color=C_DARK2, hover_color=C_GOLD2,
                       font=("Segoe UI", 12, "bold"), height=36,
+                      command=self._load_today
+                      ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(toolbar, text="+ Agregar manual",
+                      fg_color=C_CARD, hover_color=C_BORDER,
+                      font=("Segoe UI", 12), height=36,
                       command=self._add_match_dialog
                       ).pack(side="left", padx=(0, 8))
         ctk.CTkButton(toolbar, text="🔍  Escanear todo",
@@ -813,8 +863,8 @@ class ValueBetsFrame(ctk.CTkFrame):
         # Column headers
         hdr = ctk.CTkFrame(self._scroll, fg_color="transparent")
         hdr.pack(fill="x", padx=10, pady=(10, 4))
-        for text, w in [("Partido", 200), ("Prob. Modelo", 110), ("Momio", 90),
-                         ("Edge", 80), ("Stake MXN", 90), ("Señal", 150)]:
+        for text, w in [("Partido", 170), ("Momio A", 78), ("Momio B", 78),
+                         ("Prob.", 70), ("Edge", 70), ("Stake", 80), ("Señal", 130)]:
             ctk.CTkLabel(hdr, text=text, font=("Segoe UI", 10, "bold"),
                          text_color=C_MUTED, width=w, anchor="w").pack(side="left", padx=4)
 
@@ -837,20 +887,68 @@ class ValueBetsFrame(ctk.CTkFrame):
         self._rows.append(data)
         self._render_rows()
 
+    def _load_today(self):
+        if not self.engine.team_names:
+            messagebox.showwarning("Sin datos", "Carga primero los datos de la liga.")
+            return
+        fixtures = self.engine.fetch_upcoming_matches()
+        if not fixtures:
+            messagebox.showinfo(
+                "Sin partidos próximos",
+                "No encontré partidos próximos para esta liga.\n\n"
+                "Puede ser que no haya jornada programada ahora, o que falte tu "
+                "API Key de PandaScore en Configuración (se usa SOLO para traer "
+                "el calendario; los datos y el modelo son de Oracle's Elixir)."
+            )
+            return
+        existing = {(r["name_a"], r["name_b"]) for r in self._rows}
+        added = 0
+        for fx in fixtures:
+            if (fx["name_a"], fx["name_b"]) in existing:
+                continue
+            self._rows.append({"name_a": fx["name_a"], "name_b": fx["name_b"],
+                               "odd_a": None, "odd_b": None, "side": "blue"})
+            added += 1
+        self._render_rows()
+        self._summary_lbl.configure(
+            text=f"Cargué {added} partido(s). Escribe los momios de Codere en cada "
+                 f"fila y pulsa «Escanear todo».")
+
+    def _remove_row(self, row: dict):
+        if row in self._rows:
+            self._rows.remove(row)
+        self._render_rows()
+
+    @staticmethod
+    def _parse_odd(txt: str):
+        try:
+            v = int(str(txt).replace("+", "").replace(" ", ""))
+            return v if abs(v) >= 100 else None
+        except (ValueError, TypeError):
+            return None
+
     def _scan_all(self):
         if not self._rows:
             messagebox.showinfo("Sin partidos", "Agrega al menos un partido primero.")
             return
-        for i, row in enumerate(self._rows):
+        # Leer los momios escritos en las casillas de cada fila
+        for row in self._rows:
+            ea, eb = row.get("_ea"), row.get("_eb")
+            if ea is not None and eb is not None:
+                row["odd_a"] = self._parse_odd(ea.get())
+                row["odd_b"] = self._parse_odd(eb.get())
+        for row in self._rows:
+            row.pop("result", None)
+            row.pop("error", None)
+            if row.get("odd_a") is None or row.get("odd_b") is None:
+                row["error"] = "Momios inválidos (ej: -150 / +130)"
+                continue
             try:
-                result = self.engine.predict_match(
-                    row["name_a"], row["name_b"],
-                    row.get("side", "blue"),
-                    row["odd_a"], row["odd_b"]
-                )
-                self._rows[i]["result"] = result
+                row["result"] = self.engine.predict_match(
+                    row["name_a"], row["name_b"], row.get("side", "blue"),
+                    row["odd_a"], row["odd_b"])
             except Exception as e:
-                self._rows[i]["error"] = str(e)
+                row["error"] = str(e)
         self._render_rows()
 
     def _render_rows(self):
@@ -864,50 +962,56 @@ class ValueBetsFrame(ctk.CTkFrame):
             line = ctk.CTkFrame(self._results_frame, fg_color=C_PANEL, corner_radius=8)
             line.pack(fill="x", padx=10, pady=3)
 
-            def _lbl(parent, text, color=C_TEXT, w=None):
+            def _lbl(text, color=C_TEXT, w=None):
                 kw = dict(font=("Segoe UI", 11), text_color=color, anchor="w")
                 if w:
                     kw["width"] = w
-                ctk.CTkLabel(parent, text=text, **kw).pack(side="left", padx=6, pady=8)
+                ctk.CTkLabel(line, text=text, **kw).pack(side="left", padx=4, pady=6)
 
-            match_str = f"{row['name_a']} vs {row['name_b']}"
-            _lbl(line, match_str[:26], w=200)
+            _lbl(f"{row['name_a']} vs {row['name_b']}"[:24], w=170)
+
+            # Casillas de momio (siempre editables — escribe las de Codere)
+            ea = ctk.CTkEntry(line, width=70, placeholder_text="-150", justify="center",
+                              fg_color=C_PANEL, border_color=C_BORDER)
+            if row.get("odd_a") is not None:
+                ea.insert(0, f"{row['odd_a']:+d}")
+            ea.pack(side="left", padx=4, pady=6)
+            eb = ctk.CTkEntry(line, width=70, placeholder_text="+130", justify="center",
+                              fg_color=C_PANEL, border_color=C_BORDER)
+            if row.get("odd_b") is not None:
+                eb.insert(0, f"{row['odd_b']:+d}")
+            eb.pack(side="left", padx=4, pady=6)
+            row["_ea"], row["_eb"] = ea, eb
+
+            ctk.CTkButton(line, text="✕", width=26, height=26, fg_color=C_CARD,
+                          hover_color=C_RED, text_color=C_MUTED,
+                          command=lambda rr=row: self._remove_row(rr)).pack(side="right", padx=6)
 
             if r:
                 ka, kb = r["kelly_a"], r["kelly_b"]
-                # Pick the side with higher edge
-                best_k   = ka if ka.get("edge_pct", -999) >= kb.get("edge_pct", -999) else kb
-                best_prob = r["prob_a"] if ka.get("edge_pct", -999) >= kb.get("edge_pct", -999) else r["prob_b"]
-                best_name = row["name_a"] if ka.get("edge_pct", -999) >= kb.get("edge_pct", -999) else row["name_b"]
-                best_odd  = row["odd_a"] if best_name == row["name_a"] else row["odd_b"]
-
+                a_better  = ka.get("edge_pct", -999) >= kb.get("edge_pct", -999)
+                best_k    = ka if a_better else kb
+                best_prob = r["prob_a"] if a_better else r["prob_b"]
                 edge  = best_k.get("edge_pct", 0)
                 stake = best_k.get("stake_mxn", 0)
                 ev    = best_k.get("ev_mxn", 0)
                 is_v  = best_k.get("is_value", False)
 
-                _lbl(line, f"{best_prob*100:.1f}%", w=110)
-                _lbl(line, f"{best_odd:+d}", w=90)
-                ec = C_GREEN if edge > 0 else C_RED
-                _lbl(line, f"{edge:+.1f}%", color=ec, w=80)
-                _lbl(line, f"${stake:,.0f}" if is_v else "—", w=90)
-
-                sig = "🥇 OPORTUNIDAD DE ORO" if is_v else "❌ Sin ventaja"
-                sc  = C_GREEN if is_v else C_MUTED
-                _lbl(line, sig, color=sc, w=150)
+                _lbl(f"{best_prob*100:.0f}%", w=70)
+                _lbl(f"{edge:+.1f}%", color=(C_GREEN if edge > 0 else C_RED), w=70)
+                _lbl(f"${stake:,.0f}" if is_v else "—", w=80)
+                _lbl("🥇 VALOR" if is_v else "Sin ventaja",
+                     color=(C_GREEN if is_v else C_MUTED), w=130)
 
                 if is_v:
                     n_value += 1
                     total_stake += stake
                     total_ev    += ev
-            else:
-                _lbl(line, "—", w=110)
-                _lbl(line, "—", w=90)
-                err = row.get("error", "Pulsa Escanear")
-                _lbl(line, err, color=C_MUTED)
+            elif row.get("error"):
+                _lbl(row["error"], color=C_RED)
 
-        # Summary
-        if self._rows:
+        # Summary (solo tras escanear)
+        if any(row.get("result") for row in self._rows):
             pct = total_stake / self.engine.bankroll * 100 if self.engine.bankroll > 0 else 0
             self._summary_lbl.configure(
                 text=f"Oportunidades: {n_value}/{len(self._rows)}  ·  "

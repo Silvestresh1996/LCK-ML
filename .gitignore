@@ -14,9 +14,15 @@ dist/
 *.pkl
 # caché local de Oracle's Elixir (se re-descarga solo)
 oe_*.csv
+# registro de apuestas (privado)
+bets.csv
+bets_log.csv
 # registro personal de apuestas
 bets_log.csv
 
 # Python
 __pycache__/
 *.pyc
+
+# Tooling local del editor
+.claude/

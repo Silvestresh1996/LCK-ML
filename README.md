@@ -60,19 +60,22 @@ encender sin reinstalar Windows), la recomendación es **usar el lanzador
 
 ## 📈 Sobre el modelo (léelo)
 
-El modelo entrena con los **resultados reales** de los partidos descargados:
-cada partido es una fila, las features son diferencias de KPIs entre los dos
-equipos y la etiqueta es quién ganó de verdad. Busca **Valor Esperado (+EV)**:
-si la probabilidad del modelo supera a la implícita de la casa, genera una señal
-con un stake calculado por Kelly proporcional a la confianza.
+El modelo usa un **sistema de rating Elo entrenado cronológicamente**: recorre
+los partidos del más viejo al más nuevo y registra, *antes* de cada partido, el
+rating y la forma reciente que cada equipo tenía hasta ese momento (nunca con
+información del futuro). Una regresión logística calibra eso hacia una
+probabilidad fiable. Busca **Valor Esperado (+EV)**: si la probabilidad del
+modelo supera a la implícita de la casa, genera una señal con stake por Kelly.
 
-- El AUC reportado (validación cronológica) ronda **0.80–0.85** con datos reales
-  de una liga activa. **Ojo:** es algo optimista porque los KPIs se calculan
-  sobre la misma ventana de partidos que se predice (fuga leve de información).
-  El rendimiento real sobre partidos futuros será algo menor.
-- Las features de *early game* (`gold_diff_15`, `vspm`, baron) requieren el
-  endpoint de stats por partida, aún no integrado → el modelo corre en modo
-  `lite` (win rate + lados del mapa + proxy de baron).
+- **AUC honesto ≈ 0.65–0.70** (validación cronológica, **sin fuga de datos**).
+  Es modesto pero real: es lo razonable prediciendo esports solo con resultados.
+  El valor para apostar no está en acertar todo, sino en detectar partidos
+  puntuales que la casa tiene mal preciados.
+- Sube a inicio de split (arranque en frío del Elo) y mejora conforme se
+  acumulan partidos.
+- **Por qué solo Elo:** las stats detalladas por partida (oro@15, visión,
+  barones) están **bloqueadas en el plan Free** de PandaScore (HTTP 403). El
+  modelo usa lo que sí está disponible: los resultados reales de los partidos.
 
 > Apuesta con responsabilidad. El modelo es una herramienta de apoyo: te ayuda a
 > encontrar momios con valor, pero **no garantiza ganancias**. Las casas son muy

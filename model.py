@@ -1,30 +1,33 @@
 """
 ============================================================
-PREDICTION OS V2 — MOTOR DE PREDICCIÓN (entrenado sobre datos reales)
+PREDICTION OS V2 — MOTOR DE PREDICCIÓN (Elo + cronológico, sin fuga)
 ============================================================
-Diferencia clave con la versión anterior:
+Evolución del modelo:
 
-  ANTES (defectuoso):
-    Se generaban pares sintéticos A vs B y se etiquetaban con
-    `1 si win_rate(A) >= win_rate(B)`. El modelo "aprendía" que
-    gana el de mayor win_rate — algo verdadero POR CONSTRUCCIÓN.
-    El AUC resultante era engañoso (tautología).
+  v1 (defectuoso):  pares sintéticos etiquetados con `win_rate(A)>=win_rate(B)`
+                    → tautología, AUC inflado.
+  v2 (real):        entrenado sobre resultados reales (winner_id), pero los KPIs
+                    se calculaban sobre la misma ventana → fuga de información.
+  v3 (este):        SISTEMA ELO entrenado CRONOLÓGICAMENTE.
 
-  AHORA (correcto):
-    Se entrena con los RESULTADOS REALES de los partidos
-    (winner_id de /lol/matches). Cada fila es un enfrentamiento
-    que ocurrió de verdad; la etiqueta es quién ganó realmente.
-    Las features son las diferencias de KPIs entre los dos equipos.
+Cómo funciona (v3):
+  1. Se ordenan los partidos por fecha (del más viejo al más nuevo).
+  2. Cada equipo arranca con rating Elo base (1500). Se recorren los partidos
+     en orden y, ANTES de cada partido, se registran como features el rating y
+     la forma reciente que cada equipo tenía *hasta ese momento* (nunca con
+     información del futuro → SIN fuga de datos). Después se actualiza el Elo.
+  3. Una regresión logística calibra esas features (Δelo, Δforma) hacia una
+     probabilidad. La calibración es clave: el *edge* y el Kelly dependen de que
+     la probabilidad sea fiable, no solo de acertar el ganador.
 
-Limitación honesta (documentada): los KPIs (win_rate, etc.) se
-calculan sobre la misma ventana de partidos que incluye los que
-predecimos, así que hay una fuga de información leve. Con datasets
-pequeños (decenas de partidos) es un compromiso aceptable y muy
-superior a la tautología anterior. Para rigor total habría que
-calcular stats "pre-partido" con ventana móvil.
+Ventajas para apostar:
+  • AUC honesto (validación cronológica, sin fuga).
+  • Probabilidades calibradas (logística) → cálculo de value bet correcto.
+  • Usa solo resultados de partidos: 100% compatible con el plan Free de
+    PandaScore (las stats detalladas por partida están bloqueadas en Free).
 
 Componentes:
-  MatchPredictor   — entrena XGBoost (o LogisticRegression de fallback)
+  MatchPredictor   — Elo + LogisticRegression (fallback simple si hay pocos datos)
   american_to_decimal / kelly_stake — utilidades de apuestas
 ============================================================
 """
@@ -32,14 +35,12 @@ Componentes:
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from collections import defaultdict
 
 import numpy as np
 import pandas as pd
-from xgboost import XGBClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import roc_auc_score, accuracy_score, log_loss
 import joblib
 
@@ -49,12 +50,12 @@ log = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════
-#  MOTOR DE PREDICCIÓN
+#  MOTOR DE PREDICCIÓN ELO
 # ═══════════════════════════════════════════════════════════
 class MatchPredictor:
     """
-    Predice el ganador de un partido a partir de las diferencias
-    de KPIs entre los dos equipos, entrenando con resultados reales.
+    Predice el ganador combinando un rating Elo (fuerza del equipo) con la
+    forma reciente, calibrado por regresión logística.
 
     Flujo:
         pred = MatchPredictor()
@@ -62,86 +63,71 @@ class MatchPredictor:
         out = pred.predict_match(stats_a, stats_b, side_a="blue")
     """
 
-    MODE_FULL = "full"      # usa Tier-1 + Tier-2 (stats detalladas disponibles)
-    MODE_LITE = "lite"      # solo Tier-1 (stats por partida no disponibles)
-    MODE_FALLBACK = "fallback_lr"   # muy pocos datos → LogisticRegression
+    MODE_ELO      = "elo"
+    MODE_FALLBACK = "fallback_lr"
 
     def __init__(self):
         self.model = None
-        self.scaler = StandardScaler()
         self.is_trained = False
-        self.active_mode = self.MODE_LITE
-        self.active_feats: list[str] = []
+        self.active_mode = self.MODE_ELO
         self.cv_metrics: dict = {}
+        # Estado del rating, poblado durante el entrenamiento:
+        self.team_elo: dict[int, float] = {}    # {team_id → rating final}
+        self.team_form: dict[int, float] = {}   # {team_id → forma reciente 0-1}
+        self.team_name: dict[int, str] = {}     # {team_id → nombre} (para display)
 
     # ─────────────────────────────────────────
-    #  AUDITORÍA DE FEATURES DISPONIBLES
+    #  ELO
     # ─────────────────────────────────────────
-    def _audit_features(self, df_stats: pd.DataFrame) -> tuple[list[str], str]:
-        """Decide qué features tienen datos reales y el modo resultante."""
-        active = [c for c in config.FEATURES_TIER1 if c in df_stats.columns]
+    @staticmethod
+    def _expected(ra: float, rb: float) -> float:
+        """Probabilidad esperada de que A gane según la fórmula Elo."""
+        return 1.0 / (1.0 + 10.0 ** ((rb - ra) / 400.0))
 
-        usable_tier2 = []
-        for col in config.FEATURES_TIER2:
-            if col in df_stats.columns:
-                pct_nonzero = (df_stats[col].fillna(0) != 0).mean()
-                if pct_nonzero >= config.TIER2_MIN_NONZERO:
-                    usable_tier2.append(col)
-
-        if usable_tier2:
-            active += usable_tier2
-            mode = self.MODE_FULL
-        else:
-            mode = self.MODE_LITE
-            log.info("  Tier-2 sin datos → modo LITE (solo win_rate y lados).")
-
-        return active, mode
-
-    # ─────────────────────────────────────────
-    #  CONSTRUCCIÓN DEL DATASET (resultados reales)
-    # ─────────────────────────────────────────
-    def _build_dataset(
-        self,
-        df_stats: pd.DataFrame,
-        df_matches: pd.DataFrame,
-    ) -> tuple[np.ndarray, np.ndarray]:
+    def _run_elo(self, df_matches: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
         """
-        Convierte partidos reales en filas de entrenamiento.
+        Recorre los partidos en orden cronológico calculando, ANTES de cada
+        partido, las features pre-partido (sin fuga), y actualizando el Elo y
+        la forma después. Deja el estado final en self.team_elo / team_form.
 
-        Para cada partido con ganador conocido:
-            features = KPIs(team_a) - KPIs(team_b)
-            label    = 1 si ganó team_a, 0 si ganó team_b
-
-        Retorna (X, y) ordenados cronológicamente por begin_at.
-        Las filas se quedan SIN escalar (el escalado se hace fuera).
+        Retorna (X, y) con X = [Δelo, Δforma] por partido y y = ganó A.
         """
-        stats_by_id = {
-            int(r["team_id"]): r
-            for r in df_stats.to_dict("records")
-            if pd.notna(r.get("team_id"))
-        }
-
         df = df_matches.copy()
         if "begin_at" in df.columns:
             df = df.sort_values("begin_at", na_position="last")
 
+        elo: dict[int, float] = defaultdict(lambda: config.ELO_BASE)
+        form: dict[int, list] = defaultdict(list)   # historial de 1/0 por equipo
+        win = config.ELO_FORM_WINDOW
+
         rows, labels = [], []
         for m in df.to_dict("records"):
-            ta, tb, w = m.get("team_a_id"), m.get("team_b_id"), m.get("winner_id")
-            if ta is None or tb is None or w is None:
+            a, b, w = m.get("team_a_id"), m.get("team_b_id"), m.get("winner_id")
+            if a is None or b is None or w is None:
                 continue
-            ta, tb, w = int(ta), int(tb), int(w)
-            if ta not in stats_by_id or tb not in stats_by_id:
-                continue
-            if w not in (ta, tb):
+            a, b, w = int(a), int(b), int(w)
+            if w not in (a, b):
                 continue
 
-            sa, sb = stats_by_id[ta], stats_by_id[tb]
-            diff = [float(sa.get(f, 0) or 0) - float(sb.get(f, 0) or 0)
-                    for f in self.active_feats]
-            rows.append(diff)
-            labels.append(1 if w == ta else 0)
+            ra, rb = elo[a], elo[b]
+            fa = float(np.mean(form[a][-win:])) if form[a] else 0.5
+            fb = float(np.mean(form[b][-win:])) if form[b] else 0.5
 
+            # Feature pre-partido (información solo del pasado)
+            rows.append([ra - rb, fa - fb])
+            labels.append(1 if w == a else 0)
+
+            # Actualización Elo tras conocer el resultado
+            ea = self._expected(ra, rb)
+            sa = 1.0 if w == a else 0.0
+            elo[a] = ra + config.ELO_K * (sa - ea)
+            elo[b] = rb + config.ELO_K * ((1.0 - sa) - (1.0 - ea))
+            form[a].append(sa)
+            form[b].append(1.0 - sa)
+
+        self.team_elo = dict(elo)
+        self.team_form = {t: (float(np.mean(h[-win:])) if h else 0.5)
+                          for t, h in form.items()}
         return np.array(rows, dtype=float), np.array(labels, dtype=int)
 
     # ─────────────────────────────────────────
@@ -149,105 +135,91 @@ class MatchPredictor:
     # ─────────────────────────────────────────
     def train(self, df_stats: pd.DataFrame, df_matches: pd.DataFrame) -> dict:
         """
-        Entrena con resultados reales.
+        Entrena el modelo Elo cronológicamente.
 
         Args:
-            df_stats:   KPIs por equipo (de pipeline.build_team_stats)
+            df_stats:   KPIs por equipo (para nombres / display).
             df_matches: partidos reales con team_a_id, team_b_id, winner_id,
-                        begin_at (de pipeline.get_matches)
-
-        Returns:
-            dict de métricas (mode, features, matches, auc_mean, ...)
+                        begin_at (de pipeline.get_matches).
         """
-        if df_stats is None or df_stats.empty or "win_rate" not in df_stats.columns:
-            raise ValueError("df_stats vacío o sin columna 'win_rate'.")
+        if df_stats is not None and not df_stats.empty and "team_id" in df_stats.columns:
+            self.team_name = {
+                int(r["team_id"]): r.get("team_name", f"Team_{int(r['team_id'])}")
+                for r in df_stats.to_dict("records") if pd.notna(r.get("team_id"))
+            }
 
-        self.active_feats, self.active_mode = self._audit_features(df_stats)
-
-        # Sin partidos reales → no se puede entrenar honestamente: fallback.
         if df_matches is None or df_matches.empty:
-            log.warning("  Sin partidos reales — usando fallback sobre win_rate.")
+            log.warning("  Sin partidos reales — fallback sobre win_rate.")
             return self._train_fallback(df_stats)
 
-        X, y = self._build_dataset(df_stats, df_matches)
+        X, y = self._run_elo(df_matches)
         n = len(y)
-        log.info(f"  {n} partidos reales utilizables | features={self.active_feats}")
+        log.info(f"  {n} partidos reales | Elo calculado para {len(self.team_elo)} equipos")
 
-        # Pocos datos o una sola clase → fallback robusto.
         if n < config.MIN_MATCHES_FOR_ML or len(np.unique(y)) < 2:
-            log.warning(
-                f"  Solo {n} partidos (<{config.MIN_MATCHES_FOR_ML}) o clase única "
-                "— usando fallback LogisticRegression."
-            )
+            log.warning(f"  Solo {n} partidos (<{config.MIN_MATCHES_FOR_ML}) — fallback.")
             return self._train_fallback(df_stats)
 
-        # ── Escalado ──
-        X_scaled = self.scaler.fit_transform(X)
-
-        # ── CV cronológico ──
-        n_splits = max(2, min(config.TIME_SERIES_SPLITS, n // 8))
+        # ── CV cronológico (sin fuga: el orden ya es temporal) ──
+        n_splits = max(2, min(config.TIME_SERIES_SPLITS, n // 10))
         tscv = TimeSeriesSplit(n_splits=n_splits)
         aucs, accs, lls = [], [], []
-
-        for fold, (tr, val) in enumerate(tscv.split(X_scaled)):
-            if len(val) < 2:
+        for tr, val in tscv.split(X):
+            if len(np.unique(y[tr])) < 2 or len(np.unique(y[val])) < 2:
                 continue
-            y_tr, y_val = y[tr], y[val]
-            if len(np.unique(y_tr)) < 2 or len(np.unique(y_val)) < 2:
-                continue
-            mdl = XGBClassifier(**config.XGBOOST_PARAMS)
-            mdl.fit(X_scaled[tr], y_tr)
-            p = mdl.predict_proba(X_scaled[val])[:, 1]
-            aucs.append(roc_auc_score(y_val, p))
-            accs.append(accuracy_score(y_val, (p >= 0.5).astype(int)))
-            lls.append(log_loss(y_val, p, labels=[0, 1]))
-            log.info(f"    Fold {fold+1}: AUC={aucs[-1]:.3f} Acc={accs[-1]:.3f}")
+            mdl = LogisticRegression(max_iter=1000)
+            mdl.fit(X[tr], y[tr])
+            p = mdl.predict_proba(X[val])[:, 1]
+            aucs.append(roc_auc_score(y[val], p))
+            accs.append(accuracy_score(y[val], (p >= 0.5).astype(int)))
+            lls.append(log_loss(y[val], p, labels=[0, 1]))
 
-        # ── Modelo final: entrenado sobre el set SIMETRIZADO ──
-        # Añadir (B-A, 1-label) elimina cualquier sesgo por el orden en que
-        # PandaScore lista a los equipos. Las etiquetas siguen siendo reales.
-        X_sym = np.vstack([X, -X])
-        y_sym = np.concatenate([y, 1 - y])
-        X_sym_scaled = self.scaler.fit_transform(X_sym)
-        self.model = XGBClassifier(**config.XGBOOST_PARAMS)
-        self.model.fit(X_sym_scaled, y_sym)
+        # ── Modelo final sobre todos los partidos ──
+        self.model = LogisticRegression(max_iter=1000).fit(X, y)
         self.is_trained = True
+        self.active_mode = self.MODE_ELO
 
         self.cv_metrics = {
-            "mode":     self.active_mode,
-            "features": len(self.active_feats),
+            "mode":     self.MODE_ELO,
+            "features": 2,
             "matches":  n,
             "auc_mean": round(float(np.mean(aucs)), 4) if aucs else None,
             "auc_std":  round(float(np.std(aucs)), 4) if aucs else None,
             "acc_mean": round(float(np.mean(accs)), 4) if accs else None,
             "logloss":  round(float(np.mean(lls)), 4) if lls else None,
         }
-        log.info(f"  ✅ Entrenado | AUC={self.cv_metrics['auc_mean']} | modo={self.active_mode}")
+        log.info(f"  ✅ Entrenado (Elo) | AUC={self.cv_metrics['auc_mean']} "
+                 f"| acc={self.cv_metrics['acc_mean']}")
         return self.cv_metrics
 
     def _train_fallback(self, df_stats: pd.DataFrame) -> dict:
-        """
-        Fallback cuando no hay suficientes partidos reales: regresión
-        logística sobre la diferencia de win_rate. NO produce un AUC
-        creíble (datos insuficientes), así que se reporta auc_mean=None.
-        """
-        self.active_feats = ["win_rate"]
+        """Fallback con muy pocos partidos: logística sobre la diferencia de
+        win_rate. Sin AUC creíble (datos insuficientes)."""
         self.active_mode = self.MODE_FALLBACK
+        if df_stats is None or df_stats.empty or "win_rate" not in df_stats.columns:
+            # Sin nada: modelo trivial 50/50
+            self.model = None
+            self.is_trained = True
+            self.cv_metrics = {"mode": self.MODE_FALLBACK, "features": 0,
+                               "matches": 0, "auc_mean": None}
+            return self.cv_metrics
 
-        wr = df_stats["win_rate"].fillna(0.5).to_numpy().reshape(-1, 1)
-        # Diferencias contra la media de la liga, como señal mínima.
-        X = wr - float(np.mean(wr))
-        y = (X[:, 0] >= 0).astype(int)
-        self.scaler.fit(X)
+        # Asignar un "elo" proporcional al win_rate para poder predecir algo.
+        for r in df_stats.to_dict("records"):
+            if pd.notna(r.get("team_id")):
+                tid = int(r["team_id"])
+                self.team_elo[tid] = config.ELO_BASE + (float(r.get("win_rate", 0.5)) - 0.5) * 800
+                self.team_form[tid] = float(r.get("win_rate", 0.5))
+
+        wr = df_stats["win_rate"].fillna(0.5).to_numpy()
+        X = np.column_stack([(wr - wr.mean()) * 800, np.zeros(len(wr))])
+        y = (wr >= np.median(wr)).astype(int)
         if len(np.unique(y)) < 2:
-            y[0] = 1 - y[0]   # garantizar dos clases para que LR ajuste
-        self.model = LogisticRegression().fit(self.scaler.transform(X), y)
+            y[0] = 1 - y[0]
+        self.model = LogisticRegression(max_iter=1000).fit(X, y)
         self.is_trained = True
-
-        self.cv_metrics = {
-            "mode": self.MODE_FALLBACK, "features": 1,
-            "matches": 0, "auc_mean": None,
-        }
+        self.cv_metrics = {"mode": self.MODE_FALLBACK, "features": 1,
+                           "matches": 0, "auc_mean": None}
         return self.cv_metrics
 
     # ─────────────────────────────────────────
@@ -255,27 +227,28 @@ class MatchPredictor:
     # ─────────────────────────────────────────
     def predict_match(self, stats_a: dict, stats_b: dict, side_a: str = "blue") -> dict:
         """
-        Predice la probabilidad de victoria de A.
-
-        side_a aplica un pequeño ajuste heurístico de lado del mapa
-        (blue side gana ligeramente más). El ajuste es POST-modelo y
-        está documentado como heurístico, no aprendido.
+        Probabilidad de victoria de A usando el Elo y la forma actuales de
+        cada equipo, con un pequeño ajuste heurístico de lado del mapa.
         """
-        if not self.is_trained or self.model is None:
+        if not self.is_trained:
             raise RuntimeError("Modelo no entrenado. Llama a .train() primero.")
 
-        diff = np.array([[
-            float(stats_a.get(f, 0) or 0) - float(stats_b.get(f, 0) or 0)
-            for f in self.active_feats
-        ]], dtype=float)
+        ida = int(stats_a.get("team_id", -1) or -1)
+        idb = int(stats_b.get("team_id", -1) or -1)
+        ra = self.team_elo.get(ida, config.ELO_BASE)
+        rb = self.team_elo.get(idb, config.ELO_BASE)
+        fa = self.team_form.get(ida, 0.5)
+        fb = self.team_form.get(idb, 0.5)
 
-        prob_a = float(self.model.predict_proba(self.scaler.transform(diff))[0, 1])
-
-        # Ajuste heurístico de lado del mapa
-        if side_a.lower() == "blue":
-            prob_a += config.BLUE_SIDE_BONUS
+        if self.model is not None:
+            X = np.array([[ra - rb, fa - fb]], dtype=float)
+            prob_a = float(self.model.predict_proba(X)[0, 1])
         else:
-            prob_a -= config.BLUE_SIDE_BONUS
+            # Sin modelo: probabilidad Elo pura
+            prob_a = self._expected(ra, rb)
+
+        # Ajuste heurístico de lado (blue gana ligeramente más)
+        prob_a += config.BLUE_SIDE_BONUS if side_a.lower() == "blue" else -config.BLUE_SIDE_BONUS
         prob_a = float(np.clip(prob_a, 0.05, 0.95))
 
         return {
@@ -285,27 +258,37 @@ class MatchPredictor:
             "prob_b":     round(1 - prob_a, 4),
             "winner":     stats_a.get("team_name") if prob_a >= 0.5 else stats_b.get("team_name"),
             "confidence": round(max(prob_a, 1 - prob_a), 4),
+            "elo_a":      round(ra, 1),
+            "elo_b":      round(rb, 1),
             "side_a":     side_a.upper(),
             "mode":       self.active_mode,
         }
+
+    def rating_table(self) -> pd.DataFrame:
+        """Tabla de equipos ordenada por Elo (para mostrar/depurar)."""
+        rows = [{"team_id": t, "team_name": self.team_name.get(t, f"Team_{t}"),
+                 "elo": round(e, 1), "form": round(self.team_form.get(t, 0.5), 3)}
+                for t, e in self.team_elo.items()]
+        return (pd.DataFrame(rows).sort_values("elo", ascending=False).reset_index(drop=True)
+                if rows else pd.DataFrame())
 
     # ─────────────────────────────────────────
     #  PERSISTENCIA
     # ─────────────────────────────────────────
     def save(self, path: str = "model.joblib"):
         joblib.dump({
-            "model": self.model, "scaler": self.scaler,
-            "active_feats": self.active_feats, "active_mode": self.active_mode,
-            "cv_metrics": self.cv_metrics,
+            "model": self.model, "active_mode": self.active_mode,
+            "team_elo": self.team_elo, "team_form": self.team_form,
+            "team_name": self.team_name, "cv_metrics": self.cv_metrics,
         }, path)
-        log.info(f"  Modelo guardado → {path}")
 
     def load(self, path: str = "model.joblib"):
         d = joblib.load(path)
         self.model = d["model"]
-        self.scaler = d["scaler"]
-        self.active_feats = d["active_feats"]
         self.active_mode = d["active_mode"]
+        self.team_elo = d["team_elo"]
+        self.team_form = d["team_form"]
+        self.team_name = d.get("team_name", {})
         self.cv_metrics = d["cv_metrics"]
         self.is_trained = True
 

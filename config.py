@@ -126,14 +126,21 @@ XGBOOST_PARAMS = {
 }
 
 # CV cronológico (TimeSeriesSplit). Se reduce solo si hay pocos partidos.
-TIME_SERIES_SPLITS = 3
+TIME_SERIES_SPLITS = 4
 
-# Nº mínimo de partidos reales para entrenar XGBoost.
+# Nº mínimo de partidos reales para entrenar el modelo.
 # Por debajo, se usa el fallback (regresión logística sobre win_rate).
 MIN_MATCHES_FOR_ML = 20
 
 # Equipos con menos de estas partidas se descartan al calcular KPIs.
 MIN_GAMES_PER_TEAM = 3
+
+# ─────────────────────────────────────────────
+#  ♟️  SISTEMA DE RATING ELO (entrenamiento cronológico, sin fuga de datos)
+# ─────────────────────────────────────────────
+ELO_BASE        = 1500.0   # rating inicial de cada equipo
+ELO_K           = 30.0     # velocidad de ajuste tras cada partido
+ELO_FORM_WINDOW = 5        # nº de partidos recientes para la "forma" reciente
 
 
 # ─────────────────────────────────────────────

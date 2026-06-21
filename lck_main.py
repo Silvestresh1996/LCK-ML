@@ -6,17 +6,17 @@ Versión de terminal del sistema. La GUI equivalente es
 prediction_os_v2.py.
 
 FLUJO:
-  1. Descarga partidas reales de la liga (PandaScore) y calcula KPIs.
-  2. Entrena el modelo sobre resultados reales.
+  1. Descarga datos reales de la liga (Oracle's Elixir) y calcula KPIs.
+  2. Entrena el modelo (Elo + oro@15) sobre los resultados reales.
   3. Pregunta los partidos uno a uno con momios AMERICANOS (+285, -425).
   4. Calcula probabilidad del modelo + Kelly y muestra value bets.
 
 USO:
     python lck_main.py            # LCK por defecto
-    python lck_main.py 290        # otra liga por ID (290=LPL, 4197=LEC, 4198=LCS)
+    python lck_main.py LPL        # otra liga: LPL, LEC, LCS
 
-Requiere la API key en la variable de entorno PANDASCORE_API_KEY
-o en secrets_local.py. Sin datos de API, usa modo demostración.
+No requiere API key: Oracle's Elixir es gratis. Los datos se cachean
+localmente y se re-descargan solo cuando envejecen.
 ============================================================
 """
 
@@ -26,7 +26,7 @@ import logging
 import pandas as pd
 
 import config
-from universal_pipeline import UniversalPipeline
+from oracle_pipeline import OraclePipeline
 from model import MatchPredictor, american_to_decimal, kelly_stake
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
@@ -84,30 +84,24 @@ def parse_american(raw: str):
         return None
 
 
-def load_and_train(league_id: int) -> tuple[dict, MatchPredictor, str]:
-    """Descarga datos reales, calcula KPIs y entrena. Sin datos → aborta."""
-    league_name = next((n for n, i in config.LEAGUES.items() if i == league_id), f"Liga {league_id}")
+def load_and_train(league_code: str) -> tuple[dict, MatchPredictor, str]:
+    """Descarga datos reales de Oracle's Elixir, calcula KPIs y entrena."""
+    league_name = next((n for n in config.LEAGUES if n.split()[0].upper() == league_code), league_code)
     print(f"{CYAN}{LINE}\n  Cargando datos de {league_name}…\n{CYAN}{LINE}{RESET}")
-
-    if not config.PANDASCORE_API_KEY:
-        print(f"  {RED}Falta la API Key. Define PANDASCORE_API_KEY o secrets_local.py.{RESET}")
-        sys.exit(1)
 
     df_matches, df_stats = pd.DataFrame(), pd.DataFrame()
     try:
-        pipe = UniversalPipeline(league_id=league_id)
-        pipe.detect_current_patch()
-        pipe.fetch_team_names()
-        df_matches = pipe.get_matches(limit=100)
-        if not df_matches.empty:
-            df_stats = pipe.build_team_stats(df_matches, min_games=config.MIN_GAMES_PER_TEAM)
+        pipe = OraclePipeline(league_code=league_code)
+        games = pipe.load_games(progress_cb=lambda m: print(f"  {DIM}· {m}{RESET}"))
+        if not games.empty:
+            df_stats = pipe.build_team_stats(games, min_games=config.MIN_GAMES_PER_TEAM)
+            df_matches = pipe.build_matches(games)
     except Exception as e:
-        print(f"  {RED}Error de conexión: {e}{RESET}")
+        print(f"  {RED}Error cargando datos: {e}{RESET}")
         sys.exit(1)
 
     if df_stats.empty:
-        print(f"  {RED}La API no devolvió datos utilizables. Revisa tu API Key, "
-              f"tu plan o la liga.{RESET}")
+        print(f"  {RED}Sin datos para {league_code}. Revisa tu conexión.{RESET}")
         sys.exit(1)
 
     predictor = MatchPredictor()
@@ -158,11 +152,9 @@ def analyze_match(team_a, team_b, stats_dict, predictor):
 
 
 def main():
-    league_id = config.DEFAULT_LEAGUE_ID
-    if len(sys.argv) > 1 and sys.argv[1].isdigit():
-        league_id = int(sys.argv[1])
+    league_code = sys.argv[1].upper() if len(sys.argv) > 1 else "LCK"
 
-    stats_dict, predictor, league_name = load_and_train(league_id)
+    stats_dict, predictor, league_name = load_and_train(league_code)
     header(league_name)
     teams = sorted(stats_dict.keys())
 

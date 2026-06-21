@@ -44,7 +44,7 @@ import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     import config as cfg
-    from universal_pipeline import UniversalPipeline
+    from oracle_pipeline import OraclePipeline
     from model import MatchPredictor, american_to_decimal, kelly_stake
     MODULES_OK = True
 except ImportError as _err:
@@ -118,15 +118,13 @@ class PredictionEngine:
     # ─────────────────────────────────────────
     def load_league_data(self, progress_cb: Callable[[str, float], None] | None = None) -> bool:
         """
-        Flujo completo usando UniversalPipeline + MatchPredictor:
-          1. Detección dinámica de parche
-          2. Nombres reales de equipos
-          3. Descarga de partidas (con winner_id real)
-          4. Cálculo de KPIs por equipo
-          5. Entrenamiento del modelo sobre resultados reales
+        Flujo completo usando OraclePipeline + MatchPredictor:
+          1. Descarga (con caché) la base de Oracle's Elixir de la liga
+          2. Calcula KPIs por equipo (incluye oro@15 real)
+          3. Entrena el modelo Elo + oro@15 sobre los partidos reales
 
-        Si la API no devuelve datos, cae a datos de demostración para
-        que la GUI siga siendo usable sin conexión.
+        Datos reales o error claro. NUNCA datos falsos: apostarías sobre
+        números inventados. Oracle's Elixir es gratis y no requiere API key.
 
         progress_cb(mensaje, fracción 0-1) se llama en cada paso.
         """
@@ -138,51 +136,38 @@ class PredictionEngine:
             cb(f"ERROR: módulo faltante → {_IMPORT_MSG}", 1.0)
             return False
 
-        if not self.api_key:
-            cb("ERROR: falta la API Key — ponla en Configuración.", 1.0)
-            return False
-
         df_matches = pd.DataFrame()
         df_stats = pd.DataFrame()
+        league_code = self.league_name.split()[0].upper()   # "LCK — Korea" → "LCK"
 
-        # Datos reales o error claro. NUNCA datos falsos: apostarías sobre
-        # números inventados. Si la API falla, el sistema se detiene.
         try:
-            pipeline = UniversalPipeline(api_key=self.api_key, league_id=self.league_id)
+            pipeline = OraclePipeline(league_code=league_code)
 
-            # ── 1. Parche ──
-            cb("Detectando parche actual…", 0.08)
-            self.current_patch = pipeline.detect_current_patch()
-            cb(f"Parche: {self.current_patch or 'N/A'}", 0.15)
+            # ── 1. Descarga + carga (con caché) ──
+            cb("Descargando base de datos…", 0.10)
+            games = pipeline.load_games(progress_cb=lambda m: cb(m, 0.35))
+            self.current_patch = pipeline.current_patch
+            cb(f"Parche: {self.current_patch or 'N/A'}", 0.55)
 
-            # ── 2. Nombres de equipos ──
-            cb("Descargando nombres de equipos…", 0.22)
-            pipeline.fetch_team_names()
-
-            # ── 3. Partidas (resultados reales) ──
-            cb("Descargando partidas…", 0.35)
-            df_matches = pipeline.get_matches(limit=100)
-            cb(f"{len(df_matches)} partidas reales", 0.55)
-
-            # ── 4. KPIs ──
-            if not df_matches.empty:
-                cb("Calculando KPIs por equipo…", 0.65)
+            # ── 2. KPIs + matches ──
+            if not games.empty:
+                cb("Calculando KPIs por equipo…", 0.62)
                 df_stats = pipeline.build_team_stats(
-                    df_matches, min_games=getattr(cfg, "MIN_GAMES_PER_TEAM", 3)
+                    games, min_games=getattr(cfg, "MIN_GAMES_PER_TEAM", 3)
                 )
+                df_matches = pipeline.build_matches(games)
             self.pipeline = pipeline
         except Exception as exc:
-            cb(f"ERROR de conexión: {exc}", 1.0)
+            cb(f"ERROR cargando datos: {exc}", 1.0)
             return False
 
         if df_stats.empty:
-            cb("ERROR: la API no devolvió datos utilizables. Revisa tu "
-               "API Key, tu plan o la liga seleccionada.", 1.0)
+            cb(f"ERROR: sin datos para {league_code}. Revisa tu conexión.", 1.0)
             return False
 
         cb(f"KPIs listos: {len(df_stats)} equipos", 0.72)
 
-        # ── 5. Entrenamiento (sobre resultados reales) ──
+        # ── 3. Entrenamiento (Elo + oro@15, sobre resultados reales) ──
         cb("Entrenando modelo…", 0.82)
         predictor = MatchPredictor()
         try:

@@ -1,15 +1,16 @@
 # ⚡ Prediction OS V2 — Value betting para esports de LoL
 
-**Motor cuantitativo de predicción de esports basado en XGBoost.**
+**Motor cuantitativo de predicción de esports.**
 
-Descarga partidas **reales** de ligas de League of Legends (PandaScore),
-entrena un modelo sobre los **resultados reales** de esas partidas y detecta
+Descarga datos **reales** de partidas de League of Legends desde
+[Oracle's Elixir](https://oracleselixir.com) (gratis, sin API key), entrena un
+modelo de rating **Elo + oro@15** sobre los resultados reales y detecta
 *value bets* comparando la probabilidad del modelo contra los momios de la casa,
 con gestión de stake por Criterio de Kelly fraccional.
 
 > **Solo datos reales.** La app no usa datos de demostración: si no hay conexión
-> o la API no responde, se detiene con un error claro. Nunca verás números
-> inventados sobre los que podrías apostar por error.
+> o no se pueden cargar los datos, se detiene con un error claro. Nunca verás
+> números inventados sobre los que podrías apostar por error.
 
 ## 🚀 Cómo ejecutar
 
@@ -20,62 +21,56 @@ Abre **`Prediction OS.bat`**. Lanza la interfaz gráfica sin consola.
 ```powershell
 python prediction_os_v2.py     # interfaz gráfica
 python lck_main.py             # versión de terminal (LCK)
-python lck_main.py 290         # otra liga: 290=LPL, 4197=LEC, 4198=LCS
+python lck_main.py LPL         # otra liga: LPL, LEC, LCS
 ```
 
 Primera instalación de dependencias:
 ```powershell
-pip install customtkinter matplotlib xgboost scikit-learn pandas numpy requests joblib
+pip install customtkinter matplotlib scikit-learn pandas numpy requests joblib
 ```
 
-## 🔑 API key (cómo se cuida tu llave)
+## 🌐 Datos: Oracle's Elixir (gratis, sin API key)
 
-La llave **nunca** está escrita en el código ni se sube a git. Se resuelve así:
-1. Variable de entorno `PANDASCORE_API_KEY`, o
-2. Archivo `api_key.txt` junto a la app (gitignored), o
-3. `secrets_local.py` (solo en desarrollo, gitignored).
-
-La forma más fácil: abre la app → pestaña **Configuración** → pega tu API key →
-**Aplicar**. Se guarda en `api_key.txt` y no la vuelve a pedir.
+La app descarga el CSV anual de Oracle's Elixir (datos públicos de todas las
+ligas pro de LoL) desde Google Drive, **se cachea localmente** (`oe_<año>.csv`)
+y se re-descarga solo cuando el caché envejece (>12 h). **No necesitas API key.**
 
 ## 📁 Estructura del proyecto
 
 | Archivo | Rol |
 |---|---|
-| `config.py` | Configuración central: ligas, features, parámetros del modelo, bankroll/Kelly, manejo de la API key. **Sin secretos.** |
-| `universal_pipeline.py` | Capa de datos: descarga partidas reales, detecta parche, calcula KPIs por equipo. Multi-liga. |
-| `model.py` | Modelo (XGBoost) entrenado sobre resultados reales + utilidades de momios/Kelly. |
+| `config.py` | Configuración central: ligas, parámetros del modelo (Elo/Kelly), bankroll. |
+| `oracle_pipeline.py` | **Capa de datos**: descarga/cachea Oracle's Elixir, calcula KPIs por equipo y arma los partidos. |
+| `model.py` | Modelo Elo + oro@15 (validación cronológica) + utilidades de momios/Kelly. |
 | `prediction_os_v2.py` | **GUI**: dashboard, analizador, scanner de value bets, configuración. |
 | `lck_main.py` | **CLI** de terminal. |
 | `Prediction OS.bat` | Lanzador de doble clic. |
-| `build_exe.ps1` | Construye un `.exe` con PyInstaller (ver nota abajo). |
+| `build_exe.ps1` | Construye un `.exe` con PyInstaller (ver nota). |
+| `universal_pipeline.py` | Cliente de PandaScore (no usado por defecto; para un futuro plan de pago). |
 
 ## 📦 Sobre el `.exe`
 
 `build_exe.ps1` genera `dist\PredictionOS.exe`. **Importante:** si tienes
 **Smart App Control** activado en Windows, bloqueará cualquier `.exe` sin firma
-digital. Como Smart App Control solo se puede *apagar* (no se puede volver a
-encender sin reinstalar Windows), la recomendación es **usar el lanzador
-`Prediction OS.bat`** en lugar del `.exe`. El resultado es el mismo.
+digital. Como solo se puede *apagar* (no se reactiva sin reinstalar Windows), la
+recomendación es **usar `Prediction OS.bat`** en lugar del `.exe`.
 
 ## 📈 Sobre el modelo (léelo)
 
-El modelo usa un **sistema de rating Elo entrenado cronológicamente**: recorre
-los partidos del más viejo al más nuevo y registra, *antes* de cada partido, el
-rating y la forma reciente que cada equipo tenía hasta ese momento (nunca con
-información del futuro). Una regresión logística calibra eso hacia una
-probabilidad fiable. Busca **Valor Esperado (+EV)**: si la probabilidad del
-modelo supera a la implícita de la casa, genera una señal con stake por Kelly.
+El modelo usa un **rating Elo entrenado cronológicamente** más la **diferencia
+de oro a los 15 minutos**, ambos calculados *antes* de cada partido (nunca con
+información del futuro → **sin fuga de datos**). Una regresión logística calibra
+eso hacia una probabilidad fiable, clave para que el edge y el Kelly sean
+correctos. Busca **Valor Esperado (+EV)**: si la probabilidad del modelo supera
+a la implícita de la casa, genera señal con stake por Kelly.
 
-- **AUC honesto ≈ 0.65–0.70** (validación cronológica, **sin fuga de datos**).
-  Es modesto pero real: es lo razonable prediciendo esports solo con resultados.
-  El valor para apostar no está en acertar todo, sino en detectar partidos
-  puntuales que la casa tiene mal preciados.
-- Sube a inicio de split (arranque en frío del Elo) y mejora conforme se
-  acumulan partidos.
-- **Por qué solo Elo:** las stats detalladas por partida (oro@15, visión,
-  barones) están **bloqueadas en el plan Free** de PandaScore (HTTP 403). El
-  modelo usa lo que sí está disponible: los resultados reales de los partidos.
+- **AUC honesto ≈ 0.72** (validación cronológica, LCK 2026, 349 partidos).
+- **Por qué solo Elo + oro@15:** una ablación rigurosa mostró que el resto de
+  stats (primera sangre, dragón, barón, visión, forma reciente) están muy
+  correlacionadas con el Elo y solo metían ruido (con las 7 juntas el AUC caía a
+  0.62). El oro@15 es la única que añade señal independiente. *Menos es más.*
+- Las demás stats sí se calculan y se muestran en la GUI (para tu criterio),
+  aunque no entren al modelo.
 
 > Apuesta con responsabilidad. El modelo es una herramienta de apoyo: te ayuda a
 > encontrar momios con valor, pero **no garantiza ganancias**. Las casas son muy
@@ -84,3 +79,4 @@ modelo supera a la implícita de la casa, genera una señal con stake por Kelly.
 
 ---
 Desarrollado por **Jorge Silvestre Medeles Medina** | Estudiante de Ingeniería en Ciencia de Datos.
+Datos de [Oracle's Elixir](https://oracleselixir.com) (Tim Sevenhuysen).

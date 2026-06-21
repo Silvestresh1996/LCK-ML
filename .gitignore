@@ -12,6 +12,8 @@ dist/
 # Modelos entrenados / caché
 *.joblib
 *.pkl
+# caché local de Oracle's Elixir (se re-descarga solo)
+oe_*.csv
 
 # Python
 __pycache__/

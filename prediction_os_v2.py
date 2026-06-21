@@ -1,17 +1,11 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
-║        PREDICTION OS V2.0  —  Dashboard GUI                  ║
-║        Stack: customtkinter · matplotlib · xgboost           ║
+║   PREDICTION OS V2  —  Interfaz (rediseño 2026)               ║
+║   Stack: customtkinter · matplotlib · scikit-learn           ║
 ╠══════════════════════════════════════════════════════════════╣
-║  INSTALACIÓN:                                                ║
-║    pip install customtkinter matplotlib                      ║
-║    pip install xgboost scikit-learn pandas numpy requests    ║
-║                                                              ║
-║  USO:                                                        ║
-║    python prediction_os_v2.py                                ║
-║                                                              ║
-║  ARCHIVOS REQUERIDOS (mismo directorio):                     ║
-║    config.py  universal_pipeline.py  model.py               ║
+║  USO:   python prediction_os_v2.py   (o doble clic al .bat)  ║
+║  Backend (no tocar):                                         ║
+║    config.py · oracle_pipeline.py · model.py · bet_tracker.py║
 ╚══════════════════════════════════════════════════════════════╝
 """
 
@@ -20,10 +14,8 @@ import sys, os, threading, logging
 from datetime import datetime
 from typing import Callable
 
-# ── silenciar logs internos del pipeline en la GUI ──
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 
-# ── GUI imports ──
 try:
     import customtkinter as ctk
 except ImportError:
@@ -36,11 +28,10 @@ import matplotlib
 matplotlib.use("TkAgg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-import matplotlib.patches as mpatches
 import numpy as np
 import pandas as pd
 
-# ── módulos locales ──
+# ── módulos locales (backend) ──
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     import config as cfg
@@ -53,44 +44,39 @@ except ImportError as _err:
     _IMPORT_MSG = str(_err)
 
 # ═══════════════════════════════════════════════════════════════
-#  CONSTANTS
+#  TEMA / PALETA  (índigo + esmeralda sobre pizarra)
 # ═══════════════════════════════════════════════════════════════
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
 
-# Selector de ligas con sus IDs en PandaScore (desde config central)
-LEAGUES: dict[str, int] = dict(cfg.LEAGUES) if MODULES_OK else {
-    "LCK  — Korea":       293,
-    "LPL  — China":       290,
-    "LEC  — Europe":     4197,
-    "LCS  — N. America": 4198,
-}
+LEAGUES: dict[str, str] = dict(cfg.LEAGUES) if MODULES_OK else {"LCK  — Corea": "LCK"}
 
-# Paleta de colores
-C_GOLD   = "#C89B3C"   # Oro League of Legends
-C_GOLD2  = "#F0C060"   # Oro claro para hover
-C_BG     = "#141414"   # Fondo principal
-C_SIDE   = "#1a1a1a"   # Sidebar
-C_PANEL  = "#1e1e1e"   # Panel secundario
-C_CARD   = "#242424"   # Tarjeta
-C_BORDER = "#333333"   # Borde
-C_TEXT   = "#e8e8e8"   # Texto principal
-C_MUTED  = "#888888"   # Texto apagado
-C_GREEN  = "#2ecc71"   # Valor positivo
-C_RED    = "#e74c3c"   # Sin valor / peligro
-C_BLUE   = "#3498db"   # Equipo B
-C_WHITE  = "#ffffff"
-C_DARK2  = "#0d0d0d"
+C_BG      = "#0E1016"   # fondo de la app
+C_SIDE    = "#12141C"   # sidebar
+C_PANEL   = "#161A24"   # panel
+C_CARD    = "#1B2030"   # tarjeta
+C_CARD2   = "#232a3d"   # tarjeta elevada / hover
+C_BORDER  = "#2A3145"   # bordes
+C_TEXT    = "#EAecF2"   # texto principal
+C_MUTED   = "#8A93A8"   # texto apagado
+C_ACCENT  = "#6366F1"   # índigo (acción primaria)
+C_ACCENT2 = "#818CF8"   # índigo claro (hover)
+C_GREEN   = "#34D399"   # valor / positivo
+C_GREEN2  = "#10B981"
+C_RED     = "#F87171"   # negativo / sin valor
+C_BLUE    = "#38BDF8"   # equipo B / azul
+C_AMBER   = "#FBBF24"   # destacar
+C_WHITE   = "#FFFFFF"
+C_DARK    = "#0B0D12"   # texto sobre fondos claros
+
+FONT = "Segoe UI"
 
 
 # ═══════════════════════════════════════════════════════════════
-#  PREDICTION ENGINE  (backend thread-safe)
+#  PREDICTION ENGINE  (backend — sin cambios respecto a la versión previa)
 # ═══════════════════════════════════════════════════════════════
 class PredictionEngine:
-    """
-    Envuelve UniversalPipeline + MatchPredictor para el uso desde la GUI.
-    Todos los métodos pesados están pensados para correr en hilos.
-    """
+    """Envuelve OraclePipeline + MatchPredictor para uso desde la GUI."""
 
     def __init__(self):
         self.api_key        = cfg.PANDASCORE_API_KEY if MODULES_OK else ""
@@ -98,8 +84,8 @@ class PredictionEngine:
         self.league_code    = LEAGUES.get(self.league_name, "LCK")
         self.pipeline       = None
         self.predictor: "MatchPredictor | None" = None
-        self.stats_dict: dict  = {}          # {team_name → stats dict}
-        self.team_names: list  = []          # lista ordenada de nombres
+        self.stats_dict: dict  = {}
+        self.team_names: list  = []
         self.current_patch: str = ""
         self.model_metrics: dict = {}
         self.df_stats: pd.DataFrame = pd.DataFrame()
@@ -111,18 +97,10 @@ class PredictionEngine:
         self.league_code = LEAGUES.get(name, name.split()[0].upper())
 
     def set_api_key(self, key: str):
-        """Actualiza la API key en tiempo de ejecución sin reiniciar."""
         self.api_key = key.strip()
 
     def fetch_upcoming_matches(self, max_results: int = 40) -> list[dict]:
-        """
-        Trae los PRÓXIMOS partidos (calendario) y deja solo aquellos cuyos dos
-        equipos pertenecen a la liga activa, emparejando por nombre con los
-        equipos de Oracle's Elixir. Usa PandaScore (status not_started).
-
-        Requiere API Key de PandaScore (solo para el calendario; los datos y el
-        modelo siguen siendo de Oracle's Elixir). Sin key o sin partidos → [].
-        """
+        """Próximos partidos (PandaScore) cuyos dos equipos están en la liga activa."""
         if not self.api_key or not self.team_names:
             return []
         import re
@@ -159,21 +137,7 @@ class PredictionEngine:
                     break
         return out
 
-    # ─────────────────────────────────────────
-    #  Pipeline completo (corre en thread)
-    # ─────────────────────────────────────────
     def load_league_data(self, progress_cb: Callable[[str, float], None] | None = None) -> bool:
-        """
-        Flujo completo usando OraclePipeline + MatchPredictor:
-          1. Descarga (con caché) la base de Oracle's Elixir de la liga
-          2. Calcula KPIs por equipo (incluye oro@15 real)
-          3. Entrena el modelo Elo + oro@15 sobre los partidos reales
-
-        Datos reales o error claro. NUNCA datos falsos: apostarías sobre
-        números inventados. Oracle's Elixir es gratis y no requiere API key.
-
-        progress_cb(mensaje, fracción 0-1) se llama en cada paso.
-        """
         def cb(msg: str, pct: float = 0.0):
             if progress_cb:
                 progress_cb(msg, pct)
@@ -184,23 +148,18 @@ class PredictionEngine:
 
         df_matches = pd.DataFrame()
         df_stats = pd.DataFrame()
-        league_code = self.league_code   # código de Oracle's Elixir (ej. "LCK")
+        league_code = self.league_code
 
         try:
             pipeline = OraclePipeline(league_code=league_code)
-
-            # ── 1. Descarga + carga (con caché) ──
             cb("Descargando base de datos…", 0.10)
             games = pipeline.load_games(progress_cb=lambda m: cb(m, 0.35))
             self.current_patch = pipeline.current_patch
             cb(f"Parche: {self.current_patch or 'N/A'}", 0.55)
-
-            # ── 2. KPIs + matches ──
             if not games.empty:
                 cb("Calculando KPIs por equipo…", 0.62)
                 df_stats = pipeline.build_team_stats(
-                    games, min_games=getattr(cfg, "MIN_GAMES_PER_TEAM", 3)
-                )
+                    games, min_games=getattr(cfg, "MIN_GAMES_PER_TEAM", 3))
                 df_matches = pipeline.build_matches(games)
             self.pipeline = pipeline
         except Exception as exc:
@@ -212,8 +171,6 @@ class PredictionEngine:
             return False
 
         cb(f"KPIs listos: {len(df_stats)} equipos", 0.72)
-
-        # ── 3. Entrenamiento (Elo + oro@15, sobre resultados reales) ──
         cb("Entrenando modelo…", 0.82)
         predictor = MatchPredictor()
         try:
@@ -225,28 +182,15 @@ class PredictionEngine:
             predictor.is_trained = False
             self.model_metrics = {}
 
-        # ── Guardar resultados ──
         self.predictor  = predictor
         self.df_stats   = df_stats
-        self.stats_dict = {
-            row["team_name"]: row
-            for row in df_stats.to_dict("records")
-        }
+        self.stats_dict = {row["team_name"]: row for row in df_stats.to_dict("records")}
         self.team_names = sorted(self.stats_dict.keys())
-
         cb("✅  Sistema listo", 1.0)
         return True
 
-    # ─────────────────────────────────────────
-    #  Predicción individual
-    # ─────────────────────────────────────────
-    def predict_match(
-        self,
-        name_a: str, name_b: str,
-        side_a: str,
-        odd_a_am: int, odd_b_am: int
-    ) -> dict:
-        """Corre predicción + Kelly. Retorna dict con todos los resultados."""
+    def predict_match(self, name_a: str, name_b: str, side_a: str,
+                      odd_a_am: int, odd_b_am: int) -> dict:
         stats_a = self.stats_dict.get(name_a, _fallback_stats(name_a))
         stats_b = self.stats_dict.get(name_b, _fallback_stats(name_b))
 
@@ -292,54 +236,93 @@ def _fallback_probs(a: dict, b: dict) -> tuple[float, float]:
 # ═══════════════════════════════════════════════════════════════
 #  WIDGETS REUTILIZABLES
 # ═══════════════════════════════════════════════════════════════
+class StatCard(ctk.CTkFrame):
+    """Tarjeta de métrica: etiqueta · valor grande · subtítulo."""
 
-class KPICard(ctk.CTkFrame):
-    """Tarjeta de métrica: título · valor grande · subtítulo."""
+    def __init__(self, master, label: str, value: str = "—", sub: str = "",
+                 accent: str = C_TEXT, **kw):
+        super().__init__(master, fg_color=C_CARD, corner_radius=14,
+                         border_width=1, border_color=C_BORDER, **kw)
+        ctk.CTkLabel(self, text=label.upper(), font=(FONT, 10, "bold"),
+                     text_color=C_MUTED).pack(padx=16, pady=(14, 0), anchor="w")
+        self._vl = ctk.CTkLabel(self, text=value, font=(FONT, 26, "bold"),
+                                text_color=accent)
+        self._vl.pack(padx=16, pady=(2, 0), anchor="w")
+        self._sl = ctk.CTkLabel(self, text=sub, font=(FONT, 10), text_color=C_MUTED)
+        self._sl.pack(padx=16, pady=(0, 14), anchor="w")
 
-    def __init__(self, master, label: str, value: str = "—",
-                 sub: str = "", accent: bool = False, **kw):
-        super().__init__(master, fg_color=C_CARD, corner_radius=12, **kw)
-        ctk.CTkLabel(self, text=label, font=("Segoe UI", 11),
-                     text_color=C_MUTED).pack(padx=14, pady=(14, 2), anchor="w")
-        self._vl = ctk.CTkLabel(
-            self, text=value,
-            font=("Segoe UI", 22, "bold"),
-            text_color=C_GOLD if accent else C_TEXT
-        )
-        self._vl.pack(padx=14, anchor="w")
-        self._sl = ctk.CTkLabel(self, text=sub, font=("Segoe UI", 10),
-                                text_color=C_MUTED)
-        self._sl.pack(padx=14, pady=(0, 14), anchor="w")
-
-    def update_value(self, value: str, sub: str = ""):
+    def set(self, value: str, sub: str | None = None, accent: str | None = None):
         self._vl.configure(text=value)
-        if sub:
+        if accent:
+            self._vl.configure(text_color=accent)
+        if sub is not None:
             self._sl.configure(text=sub)
 
 
-class RankingChart(ctk.CTkFrame):
-    """Gráfica horizontal de barras (matplotlib) para ranking de equipos."""
+class ProbBar(ctk.CTkFrame):
+    """Barra horizontal de probabilidad A vs B (sin matplotlib, limpia)."""
 
     def __init__(self, master, **kw):
-        super().__init__(master, fg_color=C_CARD, corner_radius=12, **kw)
-        self._fig = Figure(figsize=(5.2, 3.4), dpi=96, facecolor=C_CARD)
-        self._ax  = self._fig.add_subplot(111)
-        self._ax.set_facecolor(C_CARD)
-        self._canvas = FigureCanvasTkAgg(self._fig, master=self)
-        self._canvas.get_tk_widget().configure(bg=C_CARD)
-        self._canvas.get_tk_widget().pack(fill="both", expand=True, padx=6, pady=6)
-        self._draw_placeholder()
+        super().__init__(master, fg_color="transparent", **kw)
+        self._top = ctk.CTkFrame(self, fg_color="transparent")
+        self._top.pack(fill="x", padx=4)
+        self._lbl_a = ctk.CTkLabel(self._top, text="—", font=(FONT, 13, "bold"),
+                                   text_color=C_ACCENT2)
+        self._lbl_a.pack(side="left")
+        self._lbl_b = ctk.CTkLabel(self._top, text="—", font=(FONT, 13, "bold"),
+                                   text_color=C_BLUE)
+        self._lbl_b.pack(side="right")
 
-    def _style_ax(self):
+        self._bar = ctk.CTkFrame(self, fg_color=C_PANEL, corner_radius=10, height=34)
+        self._bar.pack(fill="x", padx=4, pady=(6, 4))
+        self._bar.pack_propagate(False)
+        self._fill_a = ctk.CTkFrame(self._bar, fg_color=C_ACCENT, corner_radius=10)
+        self._fill_a.place(relx=0, rely=0, relwidth=0.5, relheight=1)
+        self._fill_b = ctk.CTkFrame(self._bar, fg_color=C_BLUE, corner_radius=10)
+        self._fill_b.place(relx=0.5, rely=0, relwidth=0.5, relheight=1)
+        self._pct_a = ctk.CTkLabel(self._bar, text="50%", font=(FONT, 12, "bold"),
+                                   text_color=C_WHITE, fg_color="transparent")
+        self._pct_a.place(relx=0.02, rely=0.5, anchor="w")
+        self._pct_b = ctk.CTkLabel(self._bar, text="50%", font=(FONT, 12, "bold"),
+                                   text_color=C_WHITE, fg_color="transparent")
+        self._pct_b.place(relx=0.98, rely=0.5, anchor="e")
+
+    def reset(self):
+        self.update(0.5, "Equipo A", "Equipo B")
+
+    def update(self, prob_a: float, name_a: str, name_b: str):
+        p = float(np.clip(prob_a, 0.02, 0.98))
+        self._lbl_a.configure(text=f"{name_a[:18]}")
+        self._lbl_b.configure(text=f"{name_b[:18]}")
+        self._fill_a.place_configure(relwidth=p)
+        self._fill_b.place_configure(relx=p, relwidth=1 - p)
+        self._pct_a.configure(text=f"{p*100:.0f}%")
+        self._pct_b.configure(text=f"{(1-p)*100:.0f}%")
+
+
+class RankingChart(ctk.CTkFrame):
+    """Gráfica de barras horizontales (matplotlib) para ranking por win rate."""
+
+    def __init__(self, master, **kw):
+        super().__init__(master, fg_color=C_CARD, corner_radius=14,
+                         border_width=1, border_color=C_BORDER, **kw)
+        self._fig = Figure(figsize=(5.2, 3.6), dpi=96, facecolor=C_CARD)
+        self._ax  = self._fig.add_subplot(111)
+        self._canvas = FigureCanvasTkAgg(self._fig, master=self)
+        self._canvas.get_tk_widget().configure(bg=C_CARD, highlightthickness=0)
+        self._canvas.get_tk_widget().pack(fill="both", expand=True, padx=8, pady=8)
+        self._placeholder()
+
+    def _style(self):
         ax = self._ax
         ax.set_facecolor(C_CARD)
         self._fig.patch.set_facecolor(C_CARD)
-        for spine in ax.spines.values():
-            spine.set_color(C_BORDER)
-        ax.tick_params(colors=C_MUTED, labelsize=8)
+        for s in ax.spines.values():
+            s.set_visible(False)
+        ax.tick_params(colors=C_MUTED, labelsize=8, length=0)
 
-    def _draw_placeholder(self):
-        self._ax.clear(); self._style_ax()
+    def _placeholder(self):
+        self._ax.clear(); self._style()
         self._ax.text(0.5, 0.5, "Carga datos para ver el ranking",
                       ha="center", va="center", color=C_MUTED, fontsize=10)
         self._ax.set_xticks([]); self._ax.set_yticks([])
@@ -347,199 +330,125 @@ class RankingChart(ctk.CTkFrame):
 
     def update(self, df: pd.DataFrame):
         if df.empty or "win_rate" not in df.columns:
-            self._draw_placeholder(); return
-        self._ax.clear(); self._style_ax()
-
-        top = df.nlargest(min(9, len(df)), "win_rate").sort_values("win_rate")
-        names  = [str(n)[:14] for n in top["team_name"]]
+            self._placeholder(); return
+        self._ax.clear(); self._style()
+        top = df.nlargest(min(10, len(df)), "win_rate").sort_values("win_rate")
+        names  = [str(n)[:16] for n in top["team_name"]]
         values = (top["win_rate"] * 100).tolist()
-        colors = [C_GOLD if v >= 65 else C_BLUE if v >= 45 else C_RED for v in values]
-
-        bars = self._ax.barh(names, values, color=colors, height=0.62, zorder=2)
+        colors = [C_GREEN if v >= 60 else C_ACCENT if v >= 45 else C_RED for v in values]
+        bars = self._ax.barh(names, values, color=colors, height=0.66, zorder=2)
         self._ax.set_xlim(0, 108)
-        self._ax.axvline(50, color=C_BORDER, lw=1, ls="--", alpha=0.6, zorder=1)
-
+        self._ax.axvline(50, color=C_BORDER, lw=1, ls="--", alpha=0.7, zorder=1)
         for bar, val in zip(bars, values):
-            self._ax.text(
-                bar.get_width() + 1,
-                bar.get_y() + bar.get_height() / 2,
-                f"{val:.0f}%", va="center", color=C_MUTED, fontsize=7.5
-            )
-        self._ax.set_xlabel("Win Rate (%)", color=C_MUTED, fontsize=8)
-        self._fig.tight_layout(pad=1.5)
+            self._ax.text(bar.get_width() + 1.5, bar.get_y() + bar.get_height() / 2,
+                          f"{val:.0f}%", va="center", color=C_MUTED, fontsize=8)
+        self._fig.tight_layout(pad=1.2)
         self._canvas.draw()
 
 
-class ProbabilityGauge(ctk.CTkFrame):
-    """
-    Semicírculo gauge matplotlib que muestra la probabilidad
-    de victoria del Equipo A (0 – 100 %).
-    """
+def _primary_btn(master, text, command, **kw):
+    return ctk.CTkButton(master, text=text, command=command,
+                         fg_color=C_ACCENT, hover_color=C_ACCENT2, text_color=C_WHITE,
+                         font=(FONT, 13, "bold"), corner_radius=10, height=40, **kw)
 
-    def __init__(self, master, **kw):
-        super().__init__(master, fg_color=C_CARD, corner_radius=12, **kw)
-        self._fig = Figure(figsize=(4.6, 2.4), dpi=96, facecolor=C_CARD)
-        self._ax  = self._fig.add_subplot(111, aspect="equal")
-        self._canvas = FigureCanvasTkAgg(self._fig, master=self)
-        self._canvas.get_tk_widget().pack(fill="both", expand=True, padx=6, pady=6)
-        self.reset()
 
-    def reset(self):
-        self.render_gauge(0.5, "—", "—")
+def _ghost_btn(master, text, command, **kw):
+    return ctk.CTkButton(master, text=text, command=command,
+                         fg_color=C_CARD2, hover_color=C_BORDER, text_color=C_TEXT,
+                         font=(FONT, 12), corner_radius=10, height=38, **kw)
 
-    def update(self, prob_a: float, name_a: str, name_b: str):
-        self.render_gauge(prob_a, name_a, name_b)
 
-    def render_gauge(self, prob_a: float = 0.5, name_a: str = "—", name_b: str = "—"):
-        ax = self._ax
-        ax.clear()
-        ax.set_facecolor(C_CARD)
-        self._fig.patch.set_facecolor(C_CARD)
+def _combo(master, values, **kw):
+    return ctk.CTkComboBox(master, values=values, fg_color=C_PANEL, border_color=C_BORDER,
+                           button_color=C_ACCENT, button_hover_color=C_ACCENT2,
+                           dropdown_fg_color=C_PANEL, dropdown_hover_color=C_CARD2,
+                           font=(FONT, 12), **kw)
 
-        # ── Fondo gris (semicírculo completo) ──
-        theta = np.linspace(np.pi, 0, 200)
-        r_outer, r_inner = 1.0, 0.58
-        xs_o = np.cos(theta) * r_outer
-        ys_o = np.sin(theta) * r_outer
-        xs_i = np.cos(theta[::-1]) * r_inner
-        ys_i = np.sin(theta[::-1]) * r_inner
-        ax.fill(
-            np.concatenate([xs_o, xs_i]),
-            np.concatenate([ys_o, ys_i]),   
-            color=C_BORDER, zorder=1
-        )
 
-        # ── Arco de Team A (izq → prob_a) ──
-        angle_a = np.pi * (1 - prob_a)           # ángulo final del arco A
-        theta_a = np.linspace(np.pi, angle_a, 200)
-        ax.fill(
-            np.concatenate([np.cos(theta_a) * r_outer, np.cos(theta_a[::-1]) * r_inner]),
-            np.concatenate([np.sin(theta_a) * r_outer, np.sin(theta_a[::-1]) * r_inner]),
-            color=C_GOLD, zorder=2, alpha=0.92
-        )
-
-        # ── Arco de Team B (prob_a → der) ──
-        theta_b = np.linspace(angle_a, 0, 200)
-        ax.fill(
-            np.concatenate([np.cos(theta_b) * r_outer, np.cos(theta_b[::-1]) * r_inner]),
-            np.concatenate([np.sin(theta_b) * r_outer, np.sin(theta_b[::-1]) * r_inner]),
-            color=C_BLUE, zorder=2, alpha=0.85
-        )
-
-        # ── Aguja ──
-        needle_angle = np.pi * (1 - prob_a)
-        ax.annotate(
-            "", xy=(np.cos(needle_angle) * 0.8, np.sin(needle_angle) * 0.8),
-            xytext=(0, 0),
-            arrowprops=dict(arrowstyle="->", color=C_WHITE, lw=2.5)
-        )
-        ax.add_patch(mpatches.Circle((0, 0), 0.07, color=C_WHITE, zorder=5))
-
-        # ── Texto central ──
-        ax.text(0, -0.12, f"{prob_a * 100:.1f}%",
-                ha="center", va="center", color=C_WHITE,
-                fontsize=15, fontweight="bold", zorder=6)
-        ax.text(-1.0, -0.22, name_a[:10], ha="center", color=C_GOLD, fontsize=8)
-        ax.text(+1.0, -0.22, name_b[:10], ha="center", color=C_BLUE, fontsize=8)
-
-        ax.set_xlim(-1.2, 1.2)
-        ax.set_ylim(-0.4, 1.1)
-        ax.axis("off")
-        self._fig.tight_layout(pad=0.5)
-        self._canvas.draw()
+def _entry(master, placeholder="", **kw):
+    return ctk.CTkEntry(master, placeholder_text=placeholder, fg_color=C_PANEL,
+                        border_color=C_BORDER, font=(FONT, 12), **kw)
 
 
 # ═══════════════════════════════════════════════════════════════
-#  FRAME 1: DASHBOARD
+#  FRAME 1 · DASHBOARD
 # ═══════════════════════════════════════════════════════════════
 class DashboardFrame(ctk.CTkFrame):
-
     def __init__(self, master, engine: PredictionEngine, **kw):
         super().__init__(master, fg_color="transparent", **kw)
         self.engine = engine
         self._build()
 
     def _build(self):
-        ctk.CTkLabel(self, text="Dashboard", font=("Segoe UI", 20, "bold"),
-                     text_color=C_TEXT).pack(anchor="w", pady=(0, 14))
+        _header(self, "Dashboard", "Resumen de la liga y del modelo")
 
-        # ── KPI cards ──
-        kpi_row = ctk.CTkFrame(self, fg_color="transparent")
-        kpi_row.pack(fill="x", pady=(0, 14))
-        kpi_row.grid_columnconfigure((0, 1, 2, 3), weight=1)
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(fill="x", pady=(0, 14))
+        row.grid_columnconfigure((0, 1, 2, 3), weight=1)
+        self._c_teams = StatCard(row, "Equipos", "—", "con datos")
+        self._c_games = StatCard(row, "Partidos", "—", "reales analizados")
+        self._c_auc   = StatCard(row, "Precisión (AUC)", "—", "validación honesta", accent=C_GREEN)
+        self._c_patch = StatCard(row, "Parche", "—", "más reciente", accent=C_AMBER)
+        for i, c in enumerate([self._c_teams, self._c_games, self._c_auc, self._c_patch]):
+            c.grid(row=0, column=i, sticky="nsew", padx=(0, 12 if i < 3 else 0))
 
-        self._c_teams   = KPICard(kpi_row, "Equipos cargados",     "—", "Sin datos")
-        self._c_matches = KPICard(kpi_row, "Partidas analizadas",   "—", "últimas 100")
-        self._c_auc     = KPICard(kpi_row, "AUC del Modelo",        "—", "TimeSeriesSplit CV", accent=True)
-        self._c_patch   = KPICard(kpi_row, "Parche Sincronizado",   "—", "Sync dinámico", accent=True)
-
-        for col, w in enumerate([self._c_teams, self._c_matches, self._c_auc, self._c_patch]):
-            w.grid(row=0, column=col, sticky="nsew", padx=(0, 10 if col < 3 else 0))
-
-        # ── Chart + info row ──
         body = ctk.CTkFrame(self, fg_color="transparent")
         body.pack(fill="both", expand=True)
 
-        # Ranking chart
-        left = ctk.CTkFrame(body, fg_color=C_CARD, corner_radius=12)
-        left.pack(side="left", fill="both", expand=True, padx=(0, 10))
-
-        ctk.CTkLabel(left, text="Ranking de equipos · Win Rate",
-                     font=("Segoe UI", 12), text_color=C_MUTED
-                     ).pack(anchor="w", padx=14, pady=(12, 0))
+        left = ctk.CTkFrame(body, fg_color="transparent")
+        left.pack(side="left", fill="both", expand=True, padx=(0, 12))
+        ctk.CTkLabel(left, text="Ranking · win rate", font=(FONT, 12, "bold"),
+                     text_color=C_MUTED).pack(anchor="w", pady=(0, 6))
         self._chart = RankingChart(left)
-        self._chart.pack(fill="both", expand=True, padx=4, pady=(0, 8))
+        self._chart.pack(fill="both", expand=True)
 
-        # Status info
-        right = ctk.CTkFrame(body, fg_color=C_CARD, corner_radius=12, width=200)
+        right = ctk.CTkFrame(body, fg_color=C_CARD, corner_radius=14,
+                             border_width=1, border_color=C_BORDER, width=260)
         right.pack(side="right", fill="y")
         right.pack_propagate(False)
-
-        ctk.CTkLabel(right, text="Estado del sistema",
-                     font=("Segoe UI", 12), text_color=C_MUTED
-                     ).pack(anchor="w", padx=14, pady=(12, 6))
-
+        ctk.CTkLabel(right, text="ESTADO DEL SISTEMA", font=(FONT, 11, "bold"),
+                     text_color=C_MUTED).pack(anchor="w", padx=16, pady=(16, 8))
         self._rows: dict[str, ctk.CTkLabel] = {}
-        for key in ["Liga activa", "Parche", "Modo ML", "Features", "Equipos", "Partidas"]:
-            row = ctk.CTkFrame(right, fg_color="transparent")
-            row.pack(fill="x", padx=14, pady=2)
-            ctk.CTkLabel(row, text=f"{key}:", font=("Segoe UI", 11),
-                         text_color=C_MUTED, width=80, anchor="w").pack(side="left")
-            lbl = ctk.CTkLabel(row, text="—", font=("Segoe UI", 11), text_color=C_TEXT)
+        for key in ["Liga", "Parche", "Modelo", "Features", "Equipos", "Partidos"]:
+            r = ctk.CTkFrame(right, fg_color="transparent")
+            r.pack(fill="x", padx=16, pady=3)
+            ctk.CTkLabel(r, text=key, font=(FONT, 11), text_color=C_MUTED,
+                         width=80, anchor="w").pack(side="left")
+            lbl = ctk.CTkLabel(r, text="—", font=(FONT, 11, "bold"), text_color=C_TEXT)
             lbl.pack(side="left")
             self._rows[key] = lbl
 
+        ctk.CTkFrame(right, fg_color=C_BORDER, height=1).pack(fill="x", padx=16, pady=10)
+        self._tip = ctk.CTkLabel(
+            right, text="Consejo: apuesta solo donde el AUC sea alto.\n"
+                        "Registra cada apuesta para medir tu ganancia real.",
+            font=(FONT, 10), text_color=C_MUTED, justify="left", wraplength=220)
+        self._tip.pack(anchor="w", padx=16, pady=(0, 16))
+
     def refresh(self, engine: PredictionEngine):
         m = engine.model_metrics
-        n_teams = len(engine.team_names)
-        n_rows  = len(engine.df_stats)
-
         auc = m.get("auc_mean")
-        auc_str = f"{auc:.3f}" if isinstance(auc, (int, float)) else "N/A"
-        n_matches = m.get("matches", 0)
-
-        self._c_teams.update_value(str(n_teams), "equipos con datos")
-        self._c_matches.update_value(str(n_matches), "partidos reales")
-        self._c_auc.update_value(
-            auc_str,
-            f"modo {m.get('mode', '?')}"
-        )
-        self._c_patch.update_value(engine.current_patch or "N/A", "parche activo")
+        auc_str = f"{auc:.2f}" if isinstance(auc, (int, float)) else "N/A"
+        auc_col = C_GREEN if isinstance(auc, (int, float)) and auc >= 0.65 else (
+            C_AMBER if isinstance(auc, (int, float)) and auc >= 0.55 else C_RED)
+        self._c_teams.set(str(len(engine.team_names)), "con datos")
+        self._c_games.set(str(m.get("matches", 0)), "reales analizados")
+        self._c_auc.set(auc_str, f"modo {m.get('mode', '?')}", accent=auc_col)
+        self._c_patch.set(engine.current_patch or "N/A", "más reciente")
         self._chart.update(engine.df_stats)
 
-        self._rows["Liga activa"].configure(text=engine.league_name.split("—")[0].strip())
+        self._rows["Liga"].configure(text=engine.league_name.split("—")[0].strip())
         self._rows["Parche"].configure(text=engine.current_patch or "—")
-        self._rows["Modo ML"].configure(text=m.get("mode", "—"))
+        self._rows["Modelo"].configure(text=m.get("mode", "—"))
         self._rows["Features"].configure(text=str(m.get("features", "—")))
-        self._rows["Equipos"].configure(text=str(n_teams))
-        self._rows["Partidas"].configure(text=str(n_rows))
+        self._rows["Equipos"].configure(text=str(len(engine.team_names)))
+        self._rows["Partidos"].configure(text=str(m.get("matches", "—")))
 
 
 # ═══════════════════════════════════════════════════════════════
-#  FRAME 2: MATCH ANALYZER
+#  FRAME 2 · MATCH ANALYZER
 # ═══════════════════════════════════════════════════════════════
-class MatchAnalyzerFrame(ctk.CTkFrame):
-
+class AnalyzerFrame(ctk.CTkFrame):
     def __init__(self, master, engine: PredictionEngine, **kw):
         super().__init__(master, fg_color="transparent", **kw)
         self.engine = engine
@@ -547,277 +456,208 @@ class MatchAnalyzerFrame(ctk.CTkFrame):
         self._build()
 
     def _build(self):
-        ctk.CTkLabel(self, text="Match Analyzer",
-                     font=("Segoe UI", 20, "bold"), text_color=C_TEXT
-                     ).pack(anchor="w", pady=(0, 14))
-
+        _header(self, "Analizador de partido", "Calcula la ventaja real frente a la casa")
         body = ctk.CTkFrame(self, fg_color="transparent")
         body.pack(fill="both", expand=True)
 
-        # ── Left: input form ──
-        form = ctk.CTkFrame(body, fg_color=C_CARD, corner_radius=12, width=320)
-        form.pack(side="left", fill="y", padx=(0, 12))
+        # ── Formulario ──
+        form = ctk.CTkFrame(body, fg_color=C_CARD, corner_radius=14,
+                            border_width=1, border_color=C_BORDER, width=320)
+        form.pack(side="left", fill="y", padx=(0, 14))
         form.pack_propagate(False)
 
-        ctk.CTkLabel(form, text="Configurar partido",
-                     font=("Segoe UI", 13, "bold"), text_color=C_TEXT
-                     ).pack(padx=18, pady=(16, 12), anchor="w")
+        def _sec(t):
+            ctk.CTkLabel(form, text=t.upper(), font=(FONT, 10, "bold"),
+                         text_color=C_MUTED).pack(padx=18, anchor="w", pady=(14, 4))
 
-        # Team selectors
-        def _section(text): 
-            ctk.CTkLabel(form, text=text, font=("Segoe UI", 10),
-                         text_color=C_MUTED).pack(padx=18, anchor="w", pady=(8, 2))
+        ctk.CTkLabel(form, text="Configurar", font=(FONT, 14, "bold"),
+                     text_color=C_TEXT).pack(padx=18, pady=(16, 0), anchor="w")
 
-        _section("EQUIPO A  (Blue Side por defecto)")
-        self._cb_a = ctk.CTkComboBox(form, values=["— carga datos primero —"],
-                                      width=280, fg_color=C_PANEL, border_color=C_BORDER,
-                                      button_color=C_GOLD, dropdown_fg_color=C_PANEL)
-        self._cb_a.pack(padx=18, pady=(0, 4))
+        _sec("Equipo A")
+        self._cb_a = _combo(form, ["— carga datos —"], width=284, command=self._auto)
+        self._cb_a.pack(padx=18)
+        _sec("Equipo B")
+        self._cb_b = _combo(form, ["— carga datos —"], width=284, command=self._auto)
+        self._cb_b.pack(padx=18)
 
-        _section("EQUIPO B  (Red Side por defecto)")
-        self._cb_b = ctk.CTkComboBox(form, values=["— carga datos primero —"],
-                                      width=280, fg_color=C_PANEL, border_color=C_BORDER,
-                                      button_color=C_GOLD, dropdown_fg_color=C_PANEL)
-        self._cb_b.pack(padx=18, pady=(0, 4))
+        _sec("Lado del mapa del Equipo A")
+        self._side = ctk.CTkSegmentedButton(
+            form, values=["A en Blue", "A en Red"],
+            fg_color=C_PANEL, selected_color=C_ACCENT, selected_hover_color=C_ACCENT2,
+            unselected_color=C_PANEL, unselected_hover_color=C_CARD2,
+            text_color=C_TEXT, font=(FONT, 11, "bold"), command=lambda _v: self._auto())
+        self._side.set("A en Blue")
+        self._side.pack(padx=18, fill="x")
+        ctk.CTkLabel(form, text="Blue side gana ~2% más (se recalcula al cambiar).",
+                     font=(FONT, 9), text_color=C_MUTED).pack(padx=18, anchor="w", pady=(3, 0))
 
-        # Side toggle
-        _section("LADO DEL MAPA")
-        side_row = ctk.CTkFrame(form, fg_color="transparent")
-        side_row.pack(padx=18, fill="x", pady=(0, 4))
-        self._side_var = tk.StringVar(value="blue")
-        ctk.CTkRadioButton(side_row, text="Blue Side (A)",
-                           variable=self._side_var, value="blue",
-                           fg_color=C_GOLD, border_color=C_GOLD
-                           ).pack(side="left", padx=(0, 16))
-        ctk.CTkRadioButton(side_row, text="Red Side (A)",
-                           variable=self._side_var, value="red",
-                           fg_color=C_RED, border_color=C_RED
-                           ).pack(side="left")
-
-        # Odds inputs
-        _section("MOMIO AMERICANO — EQUIPO A  (ej. -425 o +170)")
-        self._odd_a = ctk.CTkEntry(form, placeholder_text="-425",
-                                    width=280, fg_color=C_PANEL, border_color=C_BORDER)
+        _sec("Momio Equipo A  (ej. -160)")
+        self._odd_a = _entry(form, "-160", width=284)
         self._odd_a.pack(padx=18)
-
-        _section("MOMIO AMERICANO — EQUIPO B  (ej. +285)")
-        self._odd_b = ctk.CTkEntry(form, placeholder_text="+285",
-                                    width=280, fg_color=C_PANEL, border_color=C_BORDER)
+        self._odd_a.bind("<KeyRelease>", lambda _e: self._auto())
+        _sec("Momio Equipo B  (ej. +140)")
+        self._odd_b = _entry(form, "+140", width=284)
         self._odd_b.pack(padx=18)
+        self._odd_b.bind("<KeyRelease>", lambda _e: self._auto())
 
-        # Analyze button
-        self._btn_analyze = ctk.CTkButton(
-            form, text="⚡  Analizar partido",
-            fg_color=C_GOLD, text_color=C_DARK2, hover_color=C_GOLD2,
-            font=("Segoe UI", 13, "bold"), height=42, width=280,
-            command=self._run_analysis
-        )
-        self._btn_analyze.pack(padx=18, pady=20)
+        _primary_btn(form, "⚡  Analizar", self._run, width=284).pack(padx=18, pady=(18, 6))
+        self._err = ctk.CTkLabel(form, text="", text_color=C_RED, font=(FONT, 10),
+                                 wraplength=280)
+        self._err.pack(padx=18)
 
-        # Error label
-        self._err_lbl = ctk.CTkLabel(form, text="", text_color=C_RED,
-                                      font=("Segoe UI", 10), wraplength=270)
-        self._err_lbl.pack(padx=18)
+        # ── Resultados ──
+        res = ctk.CTkFrame(body, fg_color="transparent")
+        res.pack(side="right", fill="both", expand=True)
 
-        # ── Right: results ──
-        results = ctk.CTkFrame(body, fg_color="transparent")
-        results.pack(side="right", fill="both", expand=True)
+        gauge = ctk.CTkFrame(res, fg_color=C_CARD, corner_radius=14,
+                             border_width=1, border_color=C_BORDER)
+        gauge.pack(fill="x", pady=(0, 12))
+        ctk.CTkLabel(gauge, text="PROBABILIDAD DE VICTORIA (modelo)", font=(FONT, 10, "bold"),
+                     text_color=C_MUTED).pack(anchor="w", padx=16, pady=(14, 2))
+        self._bar = ProbBar(gauge)
+        self._bar.pack(fill="x", padx=12, pady=(0, 14))
 
-        # Gauge
-        gauge_frame = ctk.CTkFrame(results, fg_color=C_CARD, corner_radius=12)
-        gauge_frame.pack(fill="x", pady=(0, 10))
-        ctk.CTkLabel(gauge_frame, text="Probabilidad de victoria · ajuste LCK",
-                     font=("Segoe UI", 12), text_color=C_MUTED
-                     ).pack(anchor="w", padx=14, pady=(12, 0))
-        self._gauge = ProbabilityGauge(gauge_frame)
-        self._gauge.pack(fill="x", padx=6, pady=(0, 8))
+        krow = ctk.CTkFrame(res, fg_color="transparent")
+        krow.pack(fill="x", pady=(0, 12))
+        krow.grid_columnconfigure((0, 1), weight=1)
+        self._kc_a = _PickCard(krow, C_ACCENT2)
+        self._kc_a.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        self._kc_b = _PickCard(krow, C_BLUE)
+        self._kc_b.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
 
-        # Kelly cards
-        kelly_frame = ctk.CTkFrame(results, fg_color="transparent")
-        kelly_frame.pack(fill="x", pady=(0, 10))
-        kelly_frame.grid_columnconfigure((0, 1), weight=1)
-
-        self._kelly_a = _KellyCard(kelly_frame, side="a")
-        self._kelly_a.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        self._kelly_b = _KellyCard(kelly_frame, side="b")
-        self._kelly_b.grid(row=0, column=1, sticky="nsew")
-
-        # Metrics row
-        self._metrics_frame = ctk.CTkFrame(results, fg_color=C_CARD, corner_radius=12)
-        self._metrics_frame.pack(fill="x")
-        self._metrics_lbl = ctk.CTkLabel(
-            self._metrics_frame, text="Ingresa los datos y pulsa Analizar",
-            font=("Segoe UI", 11), text_color=C_MUTED
-        )
-        self._metrics_lbl.pack(padx=14, pady=14)
-
-        # Registrar apuesta
-        reg_row = ctk.CTkFrame(results, fg_color="transparent")
-        reg_row.pack(fill="x", pady=(8, 0))
-        self._btn_reg = ctk.CTkButton(
-            reg_row, text="📒  Registrar apuesta de valor",
-            fg_color=C_PANEL, hover_color=C_BORDER, font=("Segoe UI", 12),
-            height=36, state="disabled", command=self._register_bet)
-        self._btn_reg.pack(side="left")
-        self._reg_msg = ctk.CTkLabel(reg_row, text="", font=("Segoe UI", 10), text_color=C_GREEN)
-        self._reg_msg.pack(side="left", padx=12)
+        bottom = ctk.CTkFrame(res, fg_color=C_CARD, corner_radius=14,
+                              border_width=1, border_color=C_BORDER)
+        bottom.pack(fill="x")
+        inner = ctk.CTkFrame(bottom, fg_color="transparent")
+        inner.pack(fill="x", padx=8, pady=10)
+        self._reg_btn = ctk.CTkButton(
+            inner, text="📒  Registrar apuesta de valor", command=self._register_bet,
+            fg_color=C_GREEN2, hover_color=C_GREEN, text_color=C_DARK,
+            font=(FONT, 12, "bold"), corner_radius=10, height=38, state="disabled")
+        self._reg_btn.pack(side="left", padx=8)
+        self._reg_msg = ctk.CTkLabel(inner, text="Analiza un partido para ver oportunidades.",
+                                     font=(FONT, 11), text_color=C_MUTED)
+        self._reg_msg.pack(side="left", padx=10)
 
     def refresh_teams(self):
-        names = self.engine.team_names or ["— carga datos primero —"]
+        names = self.engine.team_names or ["— carga datos —"]
         self._cb_a.configure(values=names)
         self._cb_b.configure(values=names)
         if len(names) >= 2:
-            self._cb_a.set(names[0])
-            self._cb_b.set(names[1])
+            self._cb_a.set(names[0]); self._cb_b.set(names[1])
 
-    def _run_analysis(self):
-        self._err_lbl.configure(text="")
-        name_a = self._cb_a.get().strip()
-        name_b = self._cb_b.get().strip()
+    def _side_value(self) -> str:
+        return "blue" if self._side.get() == "A en Blue" else "red"
 
-        if name_a == name_b:
-            self._err_lbl.configure(text="Los equipos no pueden ser el mismo.")
+    def _auto(self, *_):
+        """Re-analiza en vivo si ya hubo un primer análisis (incluye cambio de Lado)."""
+        if self._result:
+            self._run(silent=True)
+
+    def _run(self, silent: bool = False):
+        self._err.configure(text="")
+        na, nb = self._cb_a.get().strip(), self._cb_b.get().strip()
+        if na == nb:
+            if not silent:
+                self._err.configure(text="Los equipos no pueden ser el mismo.")
             return
-        if "carga" in name_a.lower():
-            self._err_lbl.configure(text="Primero carga los datos de la liga.")
+        if "carga" in na.lower():
+            if not silent:
+                self._err.configure(text="Primero carga los datos de la liga.")
             return
-
         try:
-            raw_a = self._odd_a.get().strip() or "-200"
-            raw_b = self._odd_b.get().strip() or "+160"
-            odd_a = int(raw_a.replace("+", ""))
-            odd_b = int(raw_b.replace("+", ""))
-            if abs(odd_a) < 100 or abs(odd_b) < 100:
+            oa = int((self._odd_a.get().strip() or "-160").replace("+", ""))
+            ob = int((self._odd_b.get().strip() or "+140").replace("+", ""))
+            if abs(oa) < 100 or abs(ob) < 100:
                 raise ValueError
         except ValueError:
-            self._err_lbl.configure(text="Momios inválidos. Usa formato americano: -425 o +285")
+            if not silent:
+                self._err.configure(text="Momios inválidos. Usa formato americano: -160 o +140")
             return
 
-        side = self._side_var.get()
+        r = self.engine.predict_match(na, nb, self._side_value(), oa, ob)
+        self._show(r)
 
-        self._btn_analyze.configure(state="disabled", text="Analizando…")
-        result = self.engine.predict_match(name_a, name_b, side, odd_a, odd_b)
-        self._show_result(result)
-        self._btn_analyze.configure(state="normal", text="⚡  Analizar partido")
-
-    def _show_result(self, r: dict):
+    def _show(self, r: dict):
         self._result = r
-        prob_a = r["prob_a"]
-        name_a = r["name_a"]
-        name_b = r["name_b"]
+        self._bar.update(r["prob_a"], r["name_a"], r["name_b"])
+        self._kc_a.update(r["name_a"], r["kelly_a"], r["dec_a"], r["odd_a_am"], r["prob_a"])
+        self._kc_b.update(r["name_b"], r["kelly_b"], r["dec_b"], r["odd_b_am"], r["prob_b"])
 
-        self._gauge.update(prob_a, name_a, name_b)
-        self._kelly_a.update(name_a, r["kelly_a"], r["dec_a"], r["odd_a_am"], r["prob_a"])
-        self._kelly_b.update(name_b, r["kelly_b"], r["dec_b"], r["odd_b_am"], r["prob_b"])
-
-        # Metrics summary
-        for w in self._metrics_frame.winfo_children():
-            w.destroy()
-
-        vals = [
-            ("Modelo",        r.get("mode", "—")),
-            ("Win Rate A",    f"{r['wr_a']*100:.0f}%"),
-            ("Win Rate B",    f"{r['wr_b']*100:.0f}%"),
-            ("Cuota dec. A",  f"{r['dec_a']:.3f}"),
-            ("Cuota dec. B",  f"{r['dec_b']:.3f}"),
-        ]
-        for i, (k, v) in enumerate(vals):
-            col = ctk.CTkFrame(self._metrics_frame, fg_color="transparent")
-            col.grid(row=0, column=i, padx=12, pady=10, sticky="nsew")
-            self._metrics_frame.grid_columnconfigure(i, weight=1)
-            ctk.CTkLabel(col, text=k, font=("Segoe UI", 9),
-                         text_color=C_MUTED).pack()
-            ctk.CTkLabel(col, text=v, font=("Segoe UI", 12, "bold"),
-                         text_color=C_TEXT).pack()
-
-        # Habilitar registro solo si hay un lado con valor
         has_value = r["kelly_a"].get("is_value") or r["kelly_b"].get("is_value")
-        self._reg_msg.configure(text="")
-        self._btn_reg.configure(
-            state="normal" if has_value else "disabled",
-            text="📒  Registrar apuesta de valor" if has_value else "Sin valor para registrar")
+        self._reg_btn.configure(state="normal" if has_value else "disabled")
+        self._reg_msg.configure(
+            text="🥇 Hay valor — puedes registrar la apuesta." if has_value
+            else "Sin ventaja suficiente en este partido (necesitas edge > 7%).",
+            text_color=C_GREEN if has_value else C_MUTED)
 
     def _register_bet(self):
         r = self._result
         if not r:
             return
         ka, kb = r["kelly_a"], r["kelly_b"]
-        # Elige el lado con valor (o el de mayor edge)
-        pick_a = ka.get("is_value") and ka.get("edge_pct", -99) >= kb.get("edge_pct", -99)
-        if not ka.get("is_value") and kb.get("is_value"):
-            pick_a = False
-        elif ka.get("is_value") and not kb.get("is_value"):
+        if ka.get("is_value") and not kb.get("is_value"):
             pick_a = True
+        elif kb.get("is_value") and not ka.get("is_value"):
+            pick_a = False
+        else:
+            pick_a = ka.get("edge_pct", -99) >= kb.get("edge_pct", -99)
 
         k    = ka if pick_a else kb
         pick = r["name_a"] if pick_a else r["name_b"]
         prob = r["prob_a"] if pick_a else r["prob_b"]
         odd  = r["odd_a_am"] if pick_a else r["odd_b_am"]
         dec  = r["dec_a"] if pick_a else r["dec_b"]
-        side_a = self._side_var.get()           # lado del equipo A
+        side_a = self._side_value()
         lado = side_a if pick_a else ("red" if side_a == "blue" else "blue")
 
         bet_tracker.add_bet(
             liga=self.engine.league_name.split("—")[0].strip(),
             partido=f"{r['name_a']} vs {r['name_b']}",
             pick=pick, lado=lado, prob_modelo=prob, momio=odd,
-            cuota=dec, edge_pct=k.get("edge_pct", 0), stake_mxn=k.get("stake_mxn", 0),
-        )
-        self._reg_msg.configure(text=f"✓ Registrada: {pick} (${k.get('stake_mxn',0):,.0f})")
-        self._btn_reg.configure(state="disabled", text="Registrada ✓")
+            cuota=dec, edge_pct=k.get("edge_pct", 0), stake_mxn=k.get("stake_mxn", 0))
+        self._reg_msg.configure(text=f"✓ Registrada: {pick} (${k.get('stake_mxn', 0):,.0f} MXN)",
+                                text_color=C_GREEN)
+        self._reg_btn.configure(state="disabled", text="Registrada ✓")
 
 
-class _KellyCard(ctk.CTkFrame):
-    """Tarjeta de resultado Kelly para un equipo."""
+class _PickCard(ctk.CTkFrame):
+    """Tarjeta de resultado Kelly por equipo."""
 
-    def __init__(self, master, side: str, **kw):
-        color = C_GOLD if side == "a" else C_BLUE
-        super().__init__(master, fg_color=C_CARD, corner_radius=12, **kw)
+    def __init__(self, master, color, **kw):
+        super().__init__(master, fg_color=C_CARD, corner_radius=14,
+                         border_width=1, border_color=C_BORDER, **kw)
         self._color = color
-        ctk.CTkLabel(self, text="—", font=("Segoe UI", 11, "bold"),
-                     text_color=color).pack(padx=14, pady=(14, 2), anchor="w")
-        self._signal = ctk.CTkLabel(self, text="—", font=("Segoe UI", 18, "bold"),
-                                     text_color=C_MUTED)
-        self._signal.pack(padx=14, anchor="w")
-        self._detail = ctk.CTkLabel(self, text="—\n—\n—",
-                                     font=("Segoe UI", 10), text_color=C_MUTED,
-                                     justify="left")
-        self._detail.pack(padx=14, pady=(4, 14), anchor="w")
-        self._name_lbl = self.winfo_children()[0]
+        self._name = ctk.CTkLabel(self, text="—", font=(FONT, 12, "bold"), text_color=color)
+        self._name.pack(padx=16, pady=(14, 0), anchor="w")
+        self._sig = ctk.CTkLabel(self, text="—", font=(FONT, 16, "bold"), text_color=C_MUTED)
+        self._sig.pack(padx=16, pady=(2, 0), anchor="w")
+        self._detail = ctk.CTkLabel(self, text="—", font=(FONT, 11), text_color=C_MUTED,
+                                    justify="left")
+        self._detail.pack(padx=16, pady=(6, 14), anchor="w")
 
-    def update(self, name: str, k: dict, dec: float, odd_am: int, prob: float):
-        self._name_lbl.configure(text=name[:16])
-        is_val = k.get("is_value", False)
-        signal = "🥇 OPORTUNIDAD" if is_val else "❌ Sin ventaja"
-        color  = C_GREEN if is_val else C_RED
-        self._signal.configure(text=signal, text_color=color)
-
-        stake = k.get("stake_mxn", 0)
-        ev    = k.get("ev_mxn", 0)
-        edge  = k.get("edge_pct", 0)
-        impl  = k.get("implied_prob_pct", 0)
-
-        detail = (
-            f"Prob modelo: {prob*100:.1f}%   Prob casera: {impl:.1f}%\n"
-            f"Edge: {edge:+.1f}%   Cuota: {odd_am:+d}  ({dec:.3f})\n"
-            f"Stake Kelly: ${stake:,.0f} MXN   EV: +${ev:,.0f}"
-            if is_val else
-            f"Prob modelo: {prob*100:.1f}%   Prob casera: {impl:.1f}%\n"
-            f"Edge: {edge:+.1f}%   (necesitas > 7%)\n"
-            f"Cuota: {odd_am:+d}  ({dec:.3f})"
-        )
-        self._detail.configure(text=detail)
+    def update(self, name, k, dec, odd_am, prob):
+        self._name.configure(text=name[:18])
+        is_v = k.get("is_value", False)
+        self._sig.configure(text="🥇 VALOR" if is_v else "Sin ventaja",
+                            text_color=C_GREEN if is_v else C_MUTED)
+        edge = k.get("edge_pct", 0); impl = k.get("implied_prob_pct", 0)
+        stake = k.get("stake_mxn", 0); ev = k.get("ev_mxn", 0)
+        if is_v:
+            txt = (f"Modelo {prob*100:.0f}%  ·  casa {impl:.0f}%\n"
+                   f"Edge {edge:+.1f}%   ·   cuota {dec:.2f} ({odd_am:+d})\n"
+                   f"Apostar  ${stake:,.0f}   ·   EV  +${ev:,.0f} MXN")
+        else:
+            txt = (f"Modelo {prob*100:.0f}%  ·  casa {impl:.0f}%\n"
+                   f"Edge {edge:+.1f}%   (necesitas > 7%)\n"
+                   f"Cuota {dec:.2f} ({odd_am:+d})")
+        self._detail.configure(text=txt)
 
 
 # ═══════════════════════════════════════════════════════════════
-#  FRAME 3: VALUE BET SCANNER
+#  FRAME 3 · VALUE BET SCANNER
 # ═══════════════════════════════════════════════════════════════
 class ValueBetsFrame(ctk.CTkFrame):
-    """
-    Permite ingresar múltiples partidos con sus momios
-    y escanea todos en busca de value bets.
-    """
-
     def __init__(self, master, engine: PredictionEngine, **kw):
         super().__init__(master, fg_color="transparent", **kw)
         self.engine = engine
@@ -825,121 +665,91 @@ class ValueBetsFrame(ctk.CTkFrame):
         self._build()
 
     def _build(self):
-        ctk.CTkLabel(self, text="Value Bet Scanner",
-                     font=("Segoe UI", 20, "bold"), text_color=C_TEXT
-                     ).pack(anchor="w", pady=(0, 6))
-        ctk.CTkLabel(self, text="Agrega los partidos de la jornada con sus momios. El sistema marcará las oportunidades de valor.",
-                     font=("Segoe UI", 11), text_color=C_MUTED
-                     ).pack(anchor="w", pady=(0, 12))
+        _header(self, "Scanner de value bets",
+                "Carga la jornada, escribe las cuotas de Codere y escanea")
 
-        # Toolbar
-        toolbar = ctk.CTkFrame(self, fg_color="transparent")
-        toolbar.pack(fill="x", pady=(0, 10))
-        ctk.CTkButton(toolbar, text="📅  Cargar partidos del día",
-                      fg_color=C_GOLD, text_color=C_DARK2, hover_color=C_GOLD2,
-                      font=("Segoe UI", 12, "bold"), height=36,
-                      command=self._load_today
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.pack(fill="x", pady=(0, 12))
+        _primary_btn(bar, "📅  Cargar partidos del día", self._load_today).pack(side="left", padx=(0, 8))
+        _ghost_btn(bar, "+ Agregar manual", self._add_dialog).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(bar, text="🔍  Escanear todo", command=self._scan,
+                      fg_color=C_GREEN2, hover_color=C_GREEN, text_color=C_DARK,
+                      font=(FONT, 13, "bold"), corner_radius=10, height=40
                       ).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(toolbar, text="+ Agregar manual",
-                      fg_color=C_CARD, hover_color=C_BORDER,
-                      font=("Segoe UI", 12), height=36,
-                      command=self._add_match_dialog
-                      ).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(toolbar, text="🔍  Escanear todo",
-                      fg_color=C_BLUE, hover_color="#2980b9",
-                      font=("Segoe UI", 12, "bold"), height=36,
-                      command=self._scan_all
-                      ).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(toolbar, text="Limpiar",
-                      fg_color=C_CARD, hover_color=C_BORDER,
-                      font=("Segoe UI", 11), height=36,
-                      command=self._clear
-                      ).pack(side="left")
+        _ghost_btn(bar, "Limpiar", self._clear).pack(side="left")
 
-        # Scrollable results area
-        self._scroll = ctk.CTkScrollableFrame(self, fg_color=C_CARD, corner_radius=12)
+        self._scroll = ctk.CTkScrollableFrame(self, fg_color=C_CARD, corner_radius=14)
         self._scroll.pack(fill="both", expand=True)
-
-        # Column headers
         hdr = ctk.CTkFrame(self._scroll, fg_color="transparent")
         hdr.pack(fill="x", padx=10, pady=(10, 4))
-        for text, w in [("Partido", 170), ("Momio A", 78), ("Momio B", 78),
-                         ("Prob.", 70), ("Edge", 70), ("Stake", 80), ("Señal", 130)]:
-            ctk.CTkLabel(hdr, text=text, font=("Segoe UI", 10, "bold"),
-                         text_color=C_MUTED, width=w, anchor="w").pack(side="left", padx=4)
-
+        for t, w in [("Partido", 175), ("Momio A", 76), ("Momio B", 76),
+                     ("Prob.", 64), ("Edge", 70), ("Stake", 78), ("Señal", 120)]:
+            ctk.CTkLabel(hdr, text=t, font=(FONT, 10, "bold"), text_color=C_MUTED,
+                         width=w, anchor="w").pack(side="left", padx=4)
         ctk.CTkFrame(self._scroll, fg_color=C_BORDER, height=1).pack(fill="x", padx=10)
+        self._rf = ctk.CTkFrame(self._scroll, fg_color="transparent")
+        self._rf.pack(fill="both", expand=True)
+        self._sum = ctk.CTkLabel(self, text="", font=(FONT, 12), text_color=C_MUTED)
+        self._sum.pack(pady=8)
 
-        self._results_frame = ctk.CTkFrame(self._scroll, fg_color="transparent")
-        self._results_frame.pack(fill="both", expand=True)
-
-        self._summary_lbl = ctk.CTkLabel(self, text="", font=("Segoe UI", 11),
-                                          text_color=C_MUTED)
-        self._summary_lbl.pack(pady=8)
-
-    def _add_match_dialog(self):
+    def _add_dialog(self):
         if not self.engine.team_names:
             messagebox.showwarning("Sin datos", "Carga primero los datos de la liga.")
             return
-        _MatchInputDialog(self, self.engine.team_names, callback=self._receive_match)
+        _MatchDialog(self, self.engine.team_names, self._receive)
 
-    def _receive_match(self, data: dict):
-        self._rows.append(data)
-        self._render_rows()
+    def _receive(self, data: dict):
+        self._rows.append(data); self._render()
 
     def _load_today(self):
         if not self.engine.team_names:
             messagebox.showwarning("Sin datos", "Carga primero los datos de la liga.")
             return
-        fixtures = self.engine.fetch_upcoming_matches()
-        if not fixtures:
+        fx = self.engine.fetch_upcoming_matches()
+        if not fx:
             messagebox.showinfo(
                 "Sin partidos próximos",
                 "No encontré partidos próximos para esta liga.\n\n"
-                "Puede ser que no haya jornada programada ahora, o que falte tu "
-                "API Key de PandaScore en Configuración (se usa SOLO para traer "
-                "el calendario; los datos y el modelo son de Oracle's Elixir)."
-            )
+                "Puede que no haya jornada ahora, o que falte tu API Key de PandaScore "
+                "en Configuración (se usa SOLO para el calendario; los datos y el modelo "
+                "son de Oracle's Elixir).")
             return
         existing = {(r["name_a"], r["name_b"]) for r in self._rows}
         added = 0
-        for fx in fixtures:
-            if (fx["name_a"], fx["name_b"]) in existing:
+        for f in fx:
+            if (f["name_a"], f["name_b"]) in existing:
                 continue
-            self._rows.append({"name_a": fx["name_a"], "name_b": fx["name_b"],
+            self._rows.append({"name_a": f["name_a"], "name_b": f["name_b"],
                                "odd_a": None, "odd_b": None, "side": "blue"})
             added += 1
-        self._render_rows()
-        self._summary_lbl.configure(
-            text=f"Cargué {added} partido(s). Escribe los momios de Codere en cada "
-                 f"fila y pulsa «Escanear todo».")
+        self._render()
+        self._sum.configure(text=f"Cargué {added} partido(s). Escribe los momios de Codere "
+                                 f"y pulsa «Escanear todo».")
 
-    def _remove_row(self, row: dict):
+    def _remove(self, row):
         if row in self._rows:
             self._rows.remove(row)
-        self._render_rows()
+        self._render()
 
     @staticmethod
-    def _parse_odd(txt: str):
+    def _parse(txt):
         try:
             v = int(str(txt).replace("+", "").replace(" ", ""))
             return v if abs(v) >= 100 else None
         except (ValueError, TypeError):
             return None
 
-    def _scan_all(self):
+    def _scan(self):
         if not self._rows:
-            messagebox.showinfo("Sin partidos", "Agrega al menos un partido primero.")
+            messagebox.showinfo("Sin partidos", "Agrega o carga partidos primero.")
             return
-        # Leer los momios escritos en las casillas de cada fila
         for row in self._rows:
             ea, eb = row.get("_ea"), row.get("_eb")
             if ea is not None and eb is not None:
-                row["odd_a"] = self._parse_odd(ea.get())
-                row["odd_b"] = self._parse_odd(eb.get())
+                row["odd_a"] = self._parse(ea.get())
+                row["odd_b"] = self._parse(eb.get())
         for row in self._rows:
-            row.pop("result", None)
-            row.pop("error", None)
+            row.pop("result", None); row.pop("error", None)
             if row.get("odd_a") is None or row.get("odd_b") is None:
                 row["error"] = "Momios inválidos (ej: -150 / +130)"
                 continue
@@ -949,611 +759,473 @@ class ValueBetsFrame(ctk.CTkFrame):
                     row["odd_a"], row["odd_b"])
             except Exception as e:
                 row["error"] = str(e)
-        self._render_rows()
+        self._render()
 
-    def _render_rows(self):
-        for w in self._results_frame.winfo_children():
+    def _render(self):
+        for w in self._rf.winfo_children():
             w.destroy()
-
-        total_stake = total_ev = n_value = 0
-
+        tot_stake = tot_ev = n_val = 0
         for row in self._rows:
             r = row.get("result")
-            line = ctk.CTkFrame(self._results_frame, fg_color=C_PANEL, corner_radius=8)
+            line = ctk.CTkFrame(self._rf, fg_color=C_PANEL, corner_radius=10)
             line.pack(fill="x", padx=10, pady=3)
 
-            def _lbl(text, color=C_TEXT, w=None):
-                kw = dict(font=("Segoe UI", 11), text_color=color, anchor="w")
+            def _l(text, color=C_TEXT, w=None):
+                kw = dict(font=(FONT, 11), text_color=color, anchor="w")
                 if w:
                     kw["width"] = w
                 ctk.CTkLabel(line, text=text, **kw).pack(side="left", padx=4, pady=6)
 
-            _lbl(f"{row['name_a']} vs {row['name_b']}"[:24], w=170)
-
-            # Casillas de momio (siempre editables — escribe las de Codere)
-            ea = ctk.CTkEntry(line, width=70, placeholder_text="-150", justify="center",
-                              fg_color=C_PANEL, border_color=C_BORDER)
+            _l(f"{row['name_a']} vs {row['name_b']}"[:24], w=175)
+            ea = _entry(line, "-150", width=70, justify="center")
             if row.get("odd_a") is not None:
                 ea.insert(0, f"{row['odd_a']:+d}")
             ea.pack(side="left", padx=4, pady=6)
-            eb = ctk.CTkEntry(line, width=70, placeholder_text="+130", justify="center",
-                              fg_color=C_PANEL, border_color=C_BORDER)
+            eb = _entry(line, "+130", width=70, justify="center")
             if row.get("odd_b") is not None:
                 eb.insert(0, f"{row['odd_b']:+d}")
             eb.pack(side="left", padx=4, pady=6)
             row["_ea"], row["_eb"] = ea, eb
-
             ctk.CTkButton(line, text="✕", width=26, height=26, fg_color=C_CARD,
                           hover_color=C_RED, text_color=C_MUTED,
-                          command=lambda rr=row: self._remove_row(rr)).pack(side="right", padx=6)
+                          command=lambda rr=row: self._remove(rr)).pack(side="right", padx=6)
 
             if r:
                 ka, kb = r["kelly_a"], r["kelly_b"]
-                a_better  = ka.get("edge_pct", -999) >= kb.get("edge_pct", -999)
-                best_k    = ka if a_better else kb
-                best_prob = r["prob_a"] if a_better else r["prob_b"]
-                edge  = best_k.get("edge_pct", 0)
-                stake = best_k.get("stake_mxn", 0)
-                ev    = best_k.get("ev_mxn", 0)
-                is_v  = best_k.get("is_value", False)
-
-                _lbl(f"{best_prob*100:.0f}%", w=70)
-                _lbl(f"{edge:+.1f}%", color=(C_GREEN if edge > 0 else C_RED), w=70)
-                _lbl(f"${stake:,.0f}" if is_v else "—", w=80)
-                _lbl("🥇 VALOR" if is_v else "Sin ventaja",
-                     color=(C_GREEN if is_v else C_MUTED), w=130)
-
+                a_better = ka.get("edge_pct", -999) >= kb.get("edge_pct", -999)
+                bk = ka if a_better else kb
+                bp = r["prob_a"] if a_better else r["prob_b"]
+                edge = bk.get("edge_pct", 0); stake = bk.get("stake_mxn", 0)
+                ev = bk.get("ev_mxn", 0); is_v = bk.get("is_value", False)
+                _l(f"{bp*100:.0f}%", w=64)
+                _l(f"{edge:+.1f}%", color=(C_GREEN if edge > 0 else C_RED), w=70)
+                _l(f"${stake:,.0f}" if is_v else "—", w=78)
+                _l("🥇 VALOR" if is_v else "Sin ventaja",
+                   color=(C_GREEN if is_v else C_MUTED), w=120)
                 if is_v:
-                    n_value += 1
-                    total_stake += stake
-                    total_ev    += ev
+                    n_val += 1; tot_stake += stake; tot_ev += ev
             elif row.get("error"):
-                _lbl(row["error"], color=C_RED)
+                _l(row["error"], color=C_RED)
 
-        # Summary (solo tras escanear)
-        if any(row.get("result") for row in self._rows):
-            pct = total_stake / self.engine.bankroll * 100 if self.engine.bankroll > 0 else 0
-            self._summary_lbl.configure(
-                text=f"Oportunidades: {n_value}/{len(self._rows)}  ·  "
-                     f"Stake total: ${total_stake:,.0f} MXN ({pct:.1f}%)  ·  "
-                     f"EV esperado: +${total_ev:,.0f} MXN"
-            )
+        if any(r.get("result") for r in self._rows):
+            pct = tot_stake / self.engine.bankroll * 100 if self.engine.bankroll > 0 else 0
+            self._sum.configure(
+                text=f"Oportunidades: {n_val}/{len(self._rows)}   ·   "
+                     f"Stake total: ${tot_stake:,.0f} MXN ({pct:.1f}%)   ·   "
+                     f"EV esperado: +${tot_ev:,.0f} MXN")
 
     def _clear(self):
         self._rows.clear()
-        for w in self._results_frame.winfo_children():
+        for w in self._rf.winfo_children():
             w.destroy()
-        self._summary_lbl.configure(text="")
+        self._sum.configure(text="")
 
 
-class _MatchInputDialog(ctk.CTkToplevel):
-    """Ventana modal para ingresar un partido + momios."""
-
-    def __init__(self, master, team_names: list, callback: Callable):
+class _MatchDialog(ctk.CTkToplevel):
+    def __init__(self, master, team_names, callback):
         super().__init__(master)
         self.title("Agregar partido")
-        self.geometry("400x360")
+        self.geometry("400x340")
         self.resizable(False, False)
+        self.configure(fg_color=C_BG)
         self.grab_set()
-        self._callback = callback
-        self._names    = team_names
+        self._cb = callback
 
-        ctk.CTkLabel(self, text="Nuevo partido",
-                     font=("Segoe UI", 14, "bold")).pack(pady=(18, 12))
+        ctk.CTkLabel(self, text="Nuevo partido", font=(FONT, 15, "bold"),
+                     text_color=C_TEXT).pack(pady=(20, 14))
 
-        def _row(label, widget_fn):
+        def _row(label, w):
             f = ctk.CTkFrame(self, fg_color="transparent")
-            f.pack(fill="x", padx=24, pady=4)
-            ctk.CTkLabel(f, text=label, font=("Segoe UI", 10),
-                         text_color=C_MUTED, width=100, anchor="w").pack(side="left")
-            w = widget_fn(f)
-            w.pack(side="left", fill="x", expand=True)
-            return w
+            f.pack(fill="x", padx=26, pady=5)
+            ctk.CTkLabel(f, text=label, font=(FONT, 11), text_color=C_MUTED,
+                         width=90, anchor="w").pack(side="left")
+            wd = w(f); wd.pack(side="left", fill="x", expand=True)
+            return wd
 
-        self._cb_a = _row("Equipo A:", lambda f: ctk.CTkComboBox(
-            f, values=team_names, fg_color=C_PANEL, border_color=C_BORDER,
-            button_color=C_GOLD, dropdown_fg_color=C_PANEL))
-        if team_names: self._cb_a.set(team_names[0])
-
-        self._cb_b = _row("Equipo B:", lambda f: ctk.CTkComboBox(
-            f, values=team_names, fg_color=C_PANEL, border_color=C_BORDER,
-            button_color=C_GOLD, dropdown_fg_color=C_PANEL))
-        if len(team_names) > 1: self._cb_b.set(team_names[1])
-
-        self._e_odd_a = _row("Momio A:", lambda f: ctk.CTkEntry(
-            f, placeholder_text="-425", fg_color=C_PANEL, border_color=C_BORDER))
-        self._e_odd_b = _row("Momio B:", lambda f: ctk.CTkEntry(
-            f, placeholder_text="+285", fg_color=C_PANEL, border_color=C_BORDER))
-
-        self._err = ctk.CTkLabel(self, text="", text_color=C_RED, font=("Segoe UI", 10))
+        self._a = _row("Equipo A:", lambda f: _combo(f, team_names))
+        if team_names:
+            self._a.set(team_names[0])
+        self._b = _row("Equipo B:", lambda f: _combo(f, team_names))
+        if len(team_names) > 1:
+            self._b.set(team_names[1])
+        self._oa = _row("Momio A:", lambda f: _entry(f, "-160"))
+        self._ob = _row("Momio B:", lambda f: _entry(f, "+140"))
+        self._err = ctk.CTkLabel(self, text="", text_color=C_RED, font=(FONT, 10))
         self._err.pack()
-
-        ctk.CTkButton(self, text="Agregar", fg_color=C_GOLD, text_color=C_DARK2,
-                      hover_color=C_GOLD2, font=("Segoe UI", 12, "bold"),
-                      command=self._submit).pack(pady=16)
+        _primary_btn(self, "Agregar", self._submit, width=160).pack(pady=16)
 
     def _submit(self):
-        na = self._cb_a.get().strip()
-        nb = self._cb_b.get().strip()
+        na, nb = self._a.get().strip(), self._b.get().strip()
         if na == nb:
-            self._err.configure(text="Los equipos no pueden ser iguales.")
-            return
+            self._err.configure(text="Los equipos no pueden ser iguales."); return
         try:
-            oa = int(self._e_odd_a.get().replace("+", "") or "-200")
-            ob = int(self._e_odd_b.get().replace("+", "") or "+160")
+            oa = int((self._oa.get() or "-160").replace("+", ""))
+            ob = int((self._ob.get() or "+140").replace("+", ""))
             if abs(oa) < 100 or abs(ob) < 100:
                 raise ValueError
         except ValueError:
-            self._err.configure(text="Momios inválidos. Usa: -425 o +285")
-            return
-        self._callback({"name_a": na, "name_b": nb, "odd_a": oa, "odd_b": ob, "side": "blue"})
+            self._err.configure(text="Momios inválidos. Usa: -160 o +140"); return
+        self._cb({"name_a": na, "name_b": nb, "odd_a": oa, "odd_b": ob, "side": "blue"})
         self.destroy()
 
 
 # ═══════════════════════════════════════════════════════════════
-#  FRAME: REGISTRO DE APUESTAS
+#  FRAME 4 · REGISTRO DE APUESTAS
 # ═══════════════════════════════════════════════════════════════
-class BetLogFrame(ctk.CTkFrame):
-    """Historial de apuestas: marca resultados y mide tu rendimiento real."""
-
+class RegistroFrame(ctk.CTkFrame):
     def __init__(self, master, engine: PredictionEngine, **kw):
         super().__init__(master, fg_color="transparent", **kw)
         self.engine = engine
         self._build()
 
     def _build(self):
-        ctk.CTkLabel(self, text="Registro de apuestas",
-                     font=("Segoe UI", 20, "bold"), text_color=C_TEXT
-                     ).pack(anchor="w", pady=(0, 4))
-        ctk.CTkLabel(self, text="Marca cada apuesta como ganada o perdida para medir si el "
-                                "sistema te da ganancias de verdad.",
-                     font=("Segoe UI", 11), text_color=C_MUTED).pack(anchor="w", pady=(0, 12))
+        _header(self, "Registro de apuestas",
+                "Marca cada apuesta como ganada o perdida para medir tu ganancia real")
 
-        # ── Resumen (tarjetas) ──
-        self._sumrow = ctk.CTkFrame(self, fg_color="transparent")
-        self._sumrow.pack(fill="x", pady=(0, 12))
-        self._sumrow.grid_columnconfigure((0, 1, 2, 3, 4), weight=1)
-        self._c_bets    = KPICard(self._sumrow, "Apuestas",        "0", "registradas")
-        self._c_win     = KPICard(self._sumrow, "Aciertos",        "—", "de resueltas")
-        self._c_profit  = KPICard(self._sumrow, "Ganancia neta",   "$0", "MXN", accent=True)
-        self._c_yield   = KPICard(self._sumrow, "Yield",           "—", "ganancia / arriesgado", accent=True)
-        self._c_pending = KPICard(self._sumrow, "Pendientes",      "0", "sin resultado")
-        for i, c in enumerate([self._c_bets, self._c_win, self._c_profit, self._c_yield, self._c_pending]):
-            c.grid(row=0, column=i, sticky="nsew", padx=(0, 8 if i < 4 else 0))
+        row = ctk.CTkFrame(self, fg_color="transparent")
+        row.pack(fill="x", pady=(0, 14))
+        row.grid_columnconfigure((0, 1, 2, 3, 4), weight=1)
+        self._c_bets = StatCard(row, "Apuestas", "0", "registradas")
+        self._c_win  = StatCard(row, "Aciertos", "—", "de resueltas")
+        self._c_prof = StatCard(row, "Ganancia neta", "$0", "MXN", accent=C_GREEN)
+        self._c_yld  = StatCard(row, "Yield", "—", "ganancia / arriesgado", accent=C_GREEN)
+        self._c_pend = StatCard(row, "Pendientes", "0", "sin resultado", accent=C_AMBER)
+        for i, c in enumerate([self._c_bets, self._c_win, self._c_prof, self._c_yld, self._c_pend]):
+            c.grid(row=0, column=i, sticky="nsew", padx=(0, 10 if i < 4 else 0))
 
-        # ── Tabla ──
-        self._scroll = ctk.CTkScrollableFrame(self, fg_color=C_CARD, corner_radius=12)
+        self._scroll = ctk.CTkScrollableFrame(self, fg_color=C_CARD, corner_radius=14)
         self._scroll.pack(fill="both", expand=True)
-
         hdr = ctk.CTkFrame(self._scroll, fg_color="transparent")
         hdr.pack(fill="x", padx=10, pady=(10, 4))
-        for text, w in [("Fecha", 96), ("Partido", 190), ("Apuesta", 120), ("Cuota", 60),
-                        ("Stake", 70), ("Resultado", 200), ("Ganancia", 90), ("", 30)]:
-            ctk.CTkLabel(hdr, text=text, font=("Segoe UI", 10, "bold"),
-                         text_color=C_MUTED, width=w, anchor="w").pack(side="left", padx=4)
+        for t, w in [("Fecha", 92), ("Partido", 180), ("Apuesta", 130), ("Stake", 70),
+                     ("Resultado", 196), ("Ganancia", 86), ("", 30)]:
+            ctk.CTkLabel(hdr, text=t, font=(FONT, 10, "bold"), text_color=C_MUTED,
+                         width=w, anchor="w").pack(side="left", padx=4)
         ctk.CTkFrame(self._scroll, fg_color=C_BORDER, height=1).pack(fill="x", padx=10)
-
-        self._rows_frame = ctk.CTkFrame(self._scroll, fg_color="transparent")
-        self._rows_frame.pack(fill="both", expand=True)
-
-        self._empty_lbl = ctk.CTkLabel(self._rows_frame,
-                                       text="Aún no hay apuestas. Regístralas desde Match Analyzer.",
-                                       font=("Segoe UI", 11), text_color=C_MUTED)
+        self._rf = ctk.CTkFrame(self._scroll, fg_color="transparent")
+        self._rf.pack(fill="both", expand=True)
+        self._empty = ctk.CTkLabel(self._rf, text="Aún no hay apuestas. Regístralas desde el Analizador.",
+                                   font=(FONT, 11), text_color=C_MUTED)
 
     def refresh(self):
-        for w in self._rows_frame.winfo_children():
+        for w in self._rf.winfo_children():
             w.destroy()
+        s = bet_tracker.summary()
+        self._c_bets.set(str(s["n_total"]), "registradas")
+        self._c_win.set(f"{s['n_won']}/{s['n_settled']}" if s["n_settled"] else "—",
+                        f"{s['win_rate']*100:.0f}% acierto" if s["n_settled"] else "sin resueltas")
+        col = C_GREEN if s["profit"] >= 0 else C_RED
+        self._c_prof.set(f"${s['profit']:+,.0f}", "MXN", accent=col)
+        self._c_yld.set(f"{s['yield_pct']:+.1f}%" if s["n_settled"] else "—",
+                        "ganancia / arriesgado", accent=col if s["n_settled"] else C_TEXT)
+        self._c_pend.set(str(s["n_pending"]), "sin resultado")
 
         bets = bet_tracker.all_bets()
-        s = bet_tracker.summary()
-        self._c_bets.update_value(str(s["n_total"]), "registradas")
-        self._c_win.update_value(
-            f"{s['n_won']}/{s['n_settled']}" if s["n_settled"] else "—",
-            f"{s['win_rate']*100:.0f}% acierto" if s["n_settled"] else "sin resueltas")
-        col_p = C_GREEN if s["profit"] >= 0 else C_RED
-        self._c_profit.update_value(f"${s['profit']:+,.0f}", "MXN")
-        self._c_profit._vl.configure(text_color=col_p)
-        self._c_yield.update_value(f"{s['yield_pct']:+.1f}%" if s["n_settled"] else "—",
-                                   "ganancia / arriesgado")
-        self._c_yield._vl.configure(text_color=col_p if s["n_settled"] else C_TEXT)
-        self._c_pending.update_value(str(s["n_pending"]), "sin resultado")
-
         if not bets:
-            self._empty_lbl.pack(pady=30)
-            return
-
+            self._empty.pack(pady=30); return
         for b in bets:
             self._render_row(b)
 
     def _render_row(self, b: dict):
         estado = b.get("estado", "pendiente")
-        line = ctk.CTkFrame(self._rows_frame, fg_color=C_PANEL, corner_radius=8)
+        line = ctk.CTkFrame(self._rf, fg_color=C_PANEL, corner_radius=10)
         line.pack(fill="x", padx=10, pady=3)
 
-        def lbl(text, w, color=C_TEXT):
-            ctk.CTkLabel(line, text=text, font=("Segoe UI", 11), text_color=color,
+        def _l(text, w, color=C_TEXT):
+            ctk.CTkLabel(line, text=text, font=(FONT, 11), text_color=color,
                          width=w, anchor="w").pack(side="left", padx=4, pady=7)
 
-        lbl(b.get("fecha", "")[:10], 96, C_MUTED)
-        lbl(b.get("partido", "")[:24], 190)
-        lbl(f"{b.get('pick','')[:10]} {b.get('cuota','')}", 120, C_GOLD)
-        lbl(b.get("cuota", ""), 60)
-        lbl(f"${float(b.get('stake_mxn',0)):,.0f}", 70)
+        _l(b.get("fecha", "")[:10], 92, C_MUTED)
+        _l(b.get("partido", "")[:24], 180)
+        _l(f"{b.get('pick', '')[:10]}  {b.get('cuota', '')}", 130, C_ACCENT2)
+        _l(f"${float(b.get('stake_mxn', 0) or 0):,.0f}", 70)
 
-        # Botones de resultado
-        seg = ctk.CTkFrame(line, fg_color="transparent", width=200)
-        seg.pack(side="left", padx=4)
-        for est, txt, col in [("ganada", "✓ Ganó", C_GREEN),
-                              ("perdida", "✗ Perdió", C_RED),
+        seg = ctk.CTkFrame(line, fg_color="transparent", width=196)
+        seg.pack(side="left", padx=2)
+        for est, txt, col in [("ganada", "✓ Ganó", C_GREEN), ("perdida", "✗ Perdió", C_RED),
                               ("pendiente", "Pend.", C_MUTED)]:
             active = (estado == est)
-            ctk.CTkButton(
-                seg, text=txt, width=58, height=26,
-                font=("Segoe UI", 10, "bold" if active else "normal"),
-                fg_color=col if active else C_CARD,
-                text_color=C_DARK2 if active else C_MUTED,
-                hover_color=col,
-                command=lambda i=b["id"], e=est: self._set(i, e),
-            ).pack(side="left", padx=1)
+            ctk.CTkButton(seg, text=txt, width=58, height=26,
+                          font=(FONT, 10, "bold" if active else "normal"),
+                          fg_color=col if active else C_CARD,
+                          text_color=C_DARK if active else C_MUTED, hover_color=col,
+                          command=lambda i=b["id"], e=est: self._set(i, e)).pack(side="left", padx=1)
 
         gan = float(b.get("ganancia_mxn", 0) or 0)
         gcol = C_GREEN if gan > 0 else (C_RED if gan < 0 else C_MUTED)
-        lbl(f"${gan:+,.0f}" if estado != "pendiente" else "—", 90, gcol)
-
+        _l(f"${gan:+,.0f}" if estado != "pendiente" else "—", 86, gcol)
         ctk.CTkButton(line, text="✕", width=26, height=26, fg_color=C_CARD,
                       hover_color=C_RED, text_color=C_MUTED,
-                      command=lambda i=b["id"]: self._delete(i)).pack(side="left", padx=2)
+                      command=lambda i=b["id"]: self._del(i)).pack(side="left", padx=2)
 
     def _set(self, bet_id, estado):
-        bet_tracker.set_estado(bet_id, estado)
-        self.refresh()
+        bet_tracker.set_estado(bet_id, estado); self.refresh()
 
-    def _delete(self, bet_id):
-        bet_tracker.delete_bet(bet_id)
-        self.refresh()
+    def _del(self, bet_id):
+        bet_tracker.delete_bet(bet_id); self.refresh()
 
 
 # ═══════════════════════════════════════════════════════════════
-#  FRAME 4: SETTINGS
+#  FRAME 5 · CONFIGURACIÓN
 # ═══════════════════════════════════════════════════════════════
 class SettingsFrame(ctk.CTkFrame):
-
-    def __init__(self, master, engine: PredictionEngine,
-                 on_league_change: Callable, **kw):
+    def __init__(self, master, engine: PredictionEngine, on_league_change: Callable, **kw):
         super().__init__(master, fg_color="transparent", **kw)
         self.engine = engine
         self._on_league_change = on_league_change
         self._build()
 
     def _build(self):
-        ctk.CTkLabel(self, text="Configuración",
-                     font=("Segoe UI", 20, "bold"), text_color=C_TEXT
-                     ).pack(anchor="w", pady=(0, 14))
+        _header(self, "Configuración", "Bankroll, Kelly, liga y API key")
+        card = ctk.CTkFrame(self, fg_color=C_CARD, corner_radius=14,
+                            border_width=1, border_color=C_BORDER)
+        card.pack(fill="x")
 
-        card = ctk.CTkFrame(self, fg_color=C_CARD, corner_radius=12)
-        card.pack(fill="x", pady=(0, 12))
+        def _sec(t):
+            ctk.CTkLabel(card, text=t, font=(FONT, 12, "bold"), text_color=C_ACCENT2
+                         ).pack(anchor="w", padx=20, pady=(18, 6))
 
-        def _section(parent, title):
-            ctk.CTkLabel(parent, text=title, font=("Segoe UI", 11, "bold"),
-                         text_color=C_GOLD).pack(anchor="w", padx=18, pady=(16, 6))
+        def _div():
+            ctk.CTkFrame(card, fg_color=C_BORDER, height=1).pack(fill="x", padx=20, pady=6)
 
-        def _field(parent, label, widget):
-            row = ctk.CTkFrame(parent, fg_color="transparent")
-            row.pack(fill="x", padx=18, pady=4)
-            ctk.CTkLabel(row, text=label, font=("Segoe UI", 11), text_color=C_MUTED,
-                         width=160, anchor="w").pack(side="left")
-            widget(row)
-
-        # ── API ──
-        _section(card, "🔑  Conexión API")
-        self._e_key = ctk.CTkEntry(card, width=380, show="*",
-                                    fg_color=C_PANEL, border_color=C_BORDER,
-                                    placeholder_text="Pega tu PandaScore API Key aquí")
-        self._e_key.pack(padx=18, pady=(0, 4))
-        if MODULES_OK:
-            self._e_key.insert(0, cfg.PANDASCORE_API_KEY)
-
-        ctk.CTkButton(card, text="Aplicar API Key",
-                      fg_color=C_PANEL, hover_color=C_BORDER,
-                      font=("Segoe UI", 11), command=self._apply_key
-                      ).pack(padx=18, pady=(0, 10), anchor="w")
-
-        ctk.CTkFrame(card, fg_color=C_BORDER, height=1).pack(fill="x", padx=18)
-
-        # ── Liga ──
-        _section(card, "🏆  Liga activa")
-        self._cb_league = ctk.CTkComboBox(
-            card, values=list(LEAGUES.keys()), width=280,
-            fg_color=C_PANEL, border_color=C_BORDER,
-            button_color=C_GOLD, dropdown_fg_color=C_PANEL,
-            command=self._on_league_select
-        )
-        self._cb_league.set(list(LEAGUES.keys())[0])
-        self._cb_league.pack(padx=18, pady=(0, 14))
-
-        ctk.CTkFrame(card, fg_color=C_BORDER, height=1).pack(fill="x", padx=18)
-
-        # ── Bankroll ──
-        _section(card, "💰  Bankroll y Kelly")
-
-        _field(card, "Bankroll (MXN):", lambda p: ctk.CTkEntry(
-            p, textvariable=self._br_var, width=120,
-            fg_color=C_PANEL, border_color=C_BORDER
-        ).pack(side="left"))
-
-        _field(card, f"Fracción Kelly: {self._kf_pct():.0f}%", lambda p: None)
+        # Bankroll y Kelly
+        _sec("💰  Bankroll y Kelly")
+        f = ctk.CTkFrame(card, fg_color="transparent")
+        f.pack(fill="x", padx=20)
+        ctk.CTkLabel(f, text="Bankroll (MXN):", font=(FONT, 11), text_color=C_MUTED,
+                     width=150, anchor="w").pack(side="left")
+        ctk.CTkEntry(f, textvariable=self._br_var, width=140, fg_color=C_PANEL,
+                     border_color=C_BORDER).pack(side="left")
+        self._kelly_lbl = ctk.CTkLabel(card, text=f"Fracción Kelly: {self._kf():.0f}%",
+                                       font=(FONT, 11), text_color=C_MUTED)
+        self._kelly_lbl.pack(anchor="w", padx=20, pady=(12, 2))
         self._slider = ctk.CTkSlider(card, from_=10, to=50, number_of_steps=8,
-                                      fg_color=C_BORDER, progress_color=C_GOLD,
-                                      button_color=C_GOLD, button_hover_color=C_GOLD2,
-                                      command=self._update_kelly_label)
+                                     fg_color=C_BORDER, progress_color=C_ACCENT,
+                                     button_color=C_ACCENT, button_hover_color=C_ACCENT2,
+                                     command=self._upd_kelly)
         self._slider.set(self.engine.kelly_frac * 100)
-        self._slider.pack(padx=18, fill="x", pady=(0, 4))
-        self._kelly_lbl = ctk.CTkLabel(card, text=f"Kelly al {self._kf_pct():.0f}%",
-                                        font=("Segoe UI", 10), text_color=C_MUTED)
-        self._kelly_lbl.pack(padx=18, anchor="w", pady=(0, 14))
+        self._slider.pack(fill="x", padx=20, pady=(0, 6))
 
-        ctk.CTkButton(card, text="💾  Guardar configuración",
-                      fg_color=C_GOLD, text_color=C_DARK2, hover_color=C_GOLD2,
-                      font=("Segoe UI", 12, "bold"), height=38,
-                      command=self._save
-                      ).pack(padx=18, pady=12, anchor="w")
+        _div()
+        # Liga
+        _sec("🏆  Liga activa")
+        self._cb_league = _combo(card, list(LEAGUES.keys()), width=300,
+                                 command=lambda c: self.engine.set_league(c))
+        self._cb_league.set(self.engine.league_name)
+        self._cb_league.pack(anchor="w", padx=20)
 
-        self._status = ctk.CTkLabel(card, text="", font=("Segoe UI", 10),
-                                     text_color=C_GREEN)
-        self._status.pack(padx=18, pady=(0, 12), anchor="w")
+        _div()
+        # API key
+        _sec("🔑  API Key de PandaScore  (opcional)")
+        ctk.CTkLabel(card, text="Solo para «Cargar partidos del día» (calendario). "
+                                "Los datos del modelo son de Oracle's Elixir, gratis.",
+                     font=(FONT, 10), text_color=C_MUTED, wraplength=560,
+                     justify="left").pack(anchor="w", padx=20, pady=(0, 6))
+        self._e_key = ctk.CTkEntry(card, width=420, show="*", fg_color=C_PANEL,
+                                   border_color=C_BORDER, placeholder_text="Pega tu API Key")
+        self._e_key.pack(anchor="w", padx=20, pady=(0, 6))
+        if MODULES_OK and cfg.PANDASCORE_API_KEY:
+            self._e_key.insert(0, cfg.PANDASCORE_API_KEY)
+        _ghost_btn(card, "Aplicar API Key", self._apply_key, width=160).pack(anchor="w", padx=20)
 
-    def _br_var_init(self):
-        v = tk.StringVar(value=str(int(self.engine.bankroll)))
-        return v
+        _primary_btn(card, "💾  Guardar configuración", self._save, width=240
+                     ).pack(anchor="w", padx=20, pady=(18, 8))
+        self._status = ctk.CTkLabel(card, text="", font=(FONT, 11), text_color=C_GREEN)
+        self._status.pack(anchor="w", padx=20, pady=(0, 16))
 
-    # Lazy init to avoid Tkinter-before-mainloop issues
     @property
     def _br_var(self):
         if not hasattr(self, "_bankroll_var"):
             self._bankroll_var = tk.StringVar(value=str(int(self.engine.bankroll)))
         return self._bankroll_var
 
-    def _kf_pct(self): return self.engine.kelly_frac * 100
+    def _kf(self):
+        return self.engine.kelly_frac * 100
+
+    def _upd_kelly(self, val):
+        self._kelly_lbl.configure(text=f"Fracción Kelly: {float(val):.0f}%")
+        self.engine.kelly_frac = float(val) / 100
 
     def _apply_key(self):
         key = self._e_key.get().strip()
-        if key:
-            self.engine.set_api_key(key)
-            try:
-                cfg.save_api_key(key)
-                cfg.PANDASCORE_API_KEY = key
-                self._status.configure(
-                    text="API Key guardada. Pulsa Cargar para actualizar.",
-                    text_color=C_GREEN)
-            except Exception as exc:
-                self._status.configure(
-                    text=f"API Key aplicada (no se pudo guardar: {exc})",
-                    text_color=C_GOLD)
-
-    def _on_league_select(self, choice: str):
-        self.engine.set_league(choice)
-
-    def _update_kelly_label(self, val):
-        pct = float(val)
-        self._kelly_lbl.configure(text=f"Kelly al {pct:.0f}%")
-        self.engine.kelly_frac = pct / 100
+        if not key:
+            return
+        self.engine.set_api_key(key)
+        try:
+            cfg.save_api_key(key)
+            cfg.PANDASCORE_API_KEY = key
+            self._status.configure(text="API Key guardada.", text_color=C_GREEN)
+        except Exception as exc:
+            self._status.configure(text=f"Aplicada (no se pudo guardar: {exc})", text_color=C_AMBER)
 
     def _save(self):
         try:
             br = float(self._br_var.get().replace(",", "").replace("$", ""))
-            self.engine.bankroll   = br
+            self.engine.bankroll = br
             self.engine.kelly_frac = self._slider.get() / 100
-            league_name = self._cb_league.get()
-            self.engine.set_league(league_name)
+            name = self._cb_league.get()
+            self.engine.set_league(name)
             self._status.configure(
-                text=f"✅ Guardado — Bankroll: ${br:,.0f} MXN  Kelly: {self.engine.kelly_frac*100:.0f}%",
-                text_color=C_GREEN
-            )
-            self._on_league_change(league_name)
+                text=f"✅ Guardado — Bankroll ${br:,.0f} · Kelly {self.engine.kelly_frac*100:.0f}% "
+                     f"· Liga {name.split('—')[0].strip()}",
+                text_color=C_GREEN)
+            self._on_league_change(name)
         except ValueError:
             self._status.configure(text="Bankroll inválido.", text_color=C_RED)
 
 
 # ═══════════════════════════════════════════════════════════════
-#  MAIN APP
+#  HELPER de encabezado de página
+# ═══════════════════════════════════════════════════════════════
+def _header(master, title, subtitle):
+    ctk.CTkLabel(master, text=title, font=(FONT, 22, "bold"), text_color=C_TEXT
+                 ).pack(anchor="w", pady=(0, 2))
+    ctk.CTkLabel(master, text=subtitle, font=(FONT, 12), text_color=C_MUTED
+                 ).pack(anchor="w", pady=(0, 16))
+
+
+# ═══════════════════════════════════════════════════════════════
+#  APP PRINCIPAL
 # ═══════════════════════════════════════════════════════════════
 class PredictionOSApp(ctk.CTk):
-
     def __init__(self):
         super().__init__()
-        self.title("Prediction OS V2.0  —  eSports Analytics Dashboard")
-        self.geometry("1180x720")
-        self.minsize(980, 620)
+        self.title("Prediction OS · eSports Value Betting")
+        self.geometry("1240x760")
+        self.minsize(1040, 660)
         self.configure(fg_color=C_BG)
 
         self.engine = PredictionEngine()
-        self._active_frame: str = "dashboard"
         self._loading = False
 
         self._build_sidebar()
         self._build_content()
         self._build_statusbar()
+        self.after(500, self._start_load)
 
-        # Cargar datos al inicio (hilo de fondo)
-        self.after(600, self._start_load)
-
-    # ─────────────────────────────────────────
-    #  Layout
-    # ─────────────────────────────────────────
+    # ── Sidebar ──
     def _build_sidebar(self):
-        side = ctk.CTkFrame(self, fg_color=C_SIDE, width=200, corner_radius=0)
+        side = ctk.CTkFrame(self, fg_color=C_SIDE, width=216, corner_radius=0)
         side.pack(side="left", fill="y")
         side.pack_propagate(False)
 
-        # Logo / titulo
-        logo = ctk.CTkFrame(side, fg_color=C_DARK2, height=64, corner_radius=0)
-        logo.pack(fill="x")
+        logo = ctk.CTkFrame(side, fg_color="transparent", height=72)
+        logo.pack(fill="x", pady=(6, 0))
         logo.pack_propagate(False)
-        ctk.CTkLabel(logo, text="⚡ PREDICTION OS",
-                     font=("Segoe UI", 13, "bold"), text_color=C_GOLD
-                     ).pack(expand=True)
-        ctk.CTkLabel(logo, text="V2.0",
-                     font=("Segoe UI", 9), text_color=C_MUTED
-                     ).place(relx=1.0, rely=1.0, x=-10, y=-6, anchor="se")
+        ctk.CTkLabel(logo, text="⚡ PREDICTION OS", font=(FONT, 15, "bold"),
+                     text_color=C_WHITE).pack(anchor="w", padx=20, pady=(18, 0))
+        ctk.CTkLabel(logo, text="value betting · LoL", font=(FONT, 10),
+                     text_color=C_MUTED).pack(anchor="w", padx=20)
 
-        ctk.CTkFrame(side, fg_color=C_BORDER, height=1).pack(fill="x")
+        ctk.CTkFrame(side, fg_color=C_BORDER, height=1).pack(fill="x", padx=14, pady=8)
 
-        # Nav buttons
-        nav_items = [
-            ("dashboard",  "📊  Dashboard",     self._go_dashboard),
-            ("analyzer",   "⚔️   Match Analyzer", self._go_analyzer),
-            ("valuebets",  "💰  Value Bets",     self._go_valuebets),
-            ("registro",   "📒  Registro",       self._go_registro),
-            ("settings",   "⚙️   Configuración",  self._go_settings),
+        nav = [
+            ("dashboard", "📊   Dashboard",  self._go_dashboard),
+            ("analyzer",  "⚔️   Analizador",  self._go_analyzer),
+            ("valuebets", "💰   Value Bets",  self._go_valuebets),
+            ("registro",  "📒   Registro",    self._go_registro),
+            ("settings",  "⚙️   Configuración", self._go_settings),
         ]
-        self._nav_btns: dict[str, ctk.CTkButton] = {}
-        ctk.CTkFrame(side, fg_color="transparent", height=10).pack()
+        self._nav: dict[str, ctk.CTkButton] = {}
+        for key, label, cmd in nav:
+            b = ctk.CTkButton(side, text=label, anchor="w", font=(FONT, 13),
+                              fg_color="transparent", text_color=C_MUTED,
+                              hover_color=C_CARD, height=44, corner_radius=10, command=cmd)
+            b.pack(fill="x", padx=12, pady=2)
+            self._nav[key] = b
 
-        for key, label, cmd in nav_items:
-            btn = ctk.CTkButton(
-                side, text=label,
-                anchor="w", font=("Segoe UI", 12),
-                fg_color=C_GOLD if key == "dashboard" else "transparent",
-                text_color=C_DARK2 if key == "dashboard" else C_TEXT,
-                hover_color=C_CARD,
-                height=42, corner_radius=8,
-                command=cmd
-            )
-            btn.pack(fill="x", padx=10, pady=3)
-            self._nav_btns[key] = btn
-
-        # Separator
         ctk.CTkFrame(side, fg_color="transparent").pack(expand=True)
-        ctk.CTkFrame(side, fg_color=C_BORDER, height=1).pack(fill="x")
+        ctk.CTkFrame(side, fg_color=C_BORDER, height=1).pack(fill="x", padx=14, pady=6)
 
-        # Load button in sidebar
-        self._load_btn = ctk.CTkButton(
-            side, text="⟳  Cargar / Actualizar",
-            fg_color=C_PANEL, hover_color=C_BORDER,
-            font=("Segoe UI", 11), height=38,
-            command=self._start_load
-        )
-        self._load_btn.pack(fill="x", padx=10, pady=8)
+        ctk.CTkLabel(side, text="LIGA", font=(FONT, 9, "bold"), text_color=C_MUTED
+                     ).pack(anchor="w", padx=18, pady=(2, 2))
+        self._league_cb = _combo(side, list(LEAGUES.keys()), height=34,
+                                 command=self._on_sidebar_league)
+        self._league_cb.set(self.engine.league_name)
+        self._league_cb.pack(fill="x", padx=12, pady=(0, 8))
 
-        # League selector compacto
-        self._league_cb = ctk.CTkComboBox(
-            side, values=list(LEAGUES.keys()),
-            fg_color=C_PANEL, border_color=C_BORDER,
-            button_color=C_GOLD, dropdown_fg_color=C_PANEL,
-            font=("Segoe UI", 10), height=32,
-            command=self._on_sidebar_league_change
-        )
-        self._league_cb.set(list(LEAGUES.keys())[0])
-        self._league_cb.pack(fill="x", padx=10, pady=(0, 10))
+        self._load_btn = _ghost_btn(side, "⟳  Cargar / Actualizar", self._start_load)
+        self._load_btn.pack(fill="x", padx=12, pady=(0, 8))
 
-        # Status dot
-        self._dot_frame = ctk.CTkFrame(side, fg_color="transparent", height=28)
-        self._dot_frame.pack(fill="x", padx=10, pady=(0, 14))
-        self._dot = ctk.CTkLabel(self._dot_frame, text="●", font=("Segoe UI", 14),
-                                  text_color=C_MUTED)
+        dot = ctk.CTkFrame(side, fg_color="transparent", height=26)
+        dot.pack(fill="x", padx=18, pady=(0, 12))
+        self._dot = ctk.CTkLabel(dot, text="●", font=(FONT, 14), text_color=C_MUTED)
         self._dot.pack(side="left")
-        self._dot_lbl = ctk.CTkLabel(self._dot_frame, text=" Sin datos",
-                                      font=("Segoe UI", 10), text_color=C_MUTED)
+        self._dot_lbl = ctk.CTkLabel(dot, text=" Sin datos", font=(FONT, 10), text_color=C_MUTED)
         self._dot_lbl.pack(side="left")
 
     def _build_content(self):
         self._content = ctk.CTkFrame(self, fg_color=C_BG, corner_radius=0)
-        self._content.pack(side="right", fill="both", expand=True, padx=20, pady=16)
-
-        self._frames: dict[str, ctk.CTkFrame] = {
+        self._content.pack(side="right", fill="both", expand=True, padx=24, pady=18)
+        self._frames = {
             "dashboard": DashboardFrame(self._content, self.engine),
-            "analyzer":  MatchAnalyzerFrame(self._content, self.engine),
+            "analyzer":  AnalyzerFrame(self._content, self.engine),
             "valuebets": ValueBetsFrame(self._content, self.engine),
-            "registro":  BetLogFrame(self._content, self.engine),
+            "registro":  RegistroFrame(self._content, self.engine),
             "settings":  SettingsFrame(self._content, self.engine,
-                                        on_league_change=self._on_sidebar_league_change),
+                                       on_league_change=self._on_sidebar_league),
         }
         for f in self._frames.values():
             f.pack(fill="both", expand=True)
-
         self._show("dashboard")
 
     def _build_statusbar(self):
-        self._statusbar = ctk.CTkFrame(self, fg_color=C_DARK2, height=24, corner_radius=0)
-        self._statusbar.pack(side="bottom", fill="x")
-        self._status_lbl = ctk.CTkLabel(
-            self._statusbar, text="Iniciando sistema…",
-            font=("Segoe UI", 9), text_color=C_MUTED
-        )
-        self._status_lbl.pack(side="left", padx=12)
-        ctk.CTkLabel(
-            self._statusbar,
-            text=f"Prediction OS V2.0  ·  {datetime.now().year}",
-            font=("Segoe UI", 9), text_color=C_MUTED
-        ).pack(side="right", padx=12)
-
-        self._progress = ctk.CTkProgressBar(
-            self._statusbar, mode="determinate",
-            fg_color=C_BORDER, progress_color=C_GOLD,
-            height=6, width=200
-        )
+        bar = ctk.CTkFrame(self, fg_color=C_SIDE, height=26, corner_radius=0)
+        bar.pack(side="bottom", fill="x")
+        self._status = ctk.CTkLabel(bar, text="Iniciando…", font=(FONT, 9), text_color=C_MUTED)
+        self._status.pack(side="left", padx=14)
+        ctk.CTkLabel(bar, text=f"Prediction OS · {datetime.now().year}", font=(FONT, 9),
+                     text_color=C_MUTED).pack(side="right", padx=14)
+        self._progress = ctk.CTkProgressBar(bar, mode="determinate", fg_color=C_BORDER,
+                                            progress_color=C_ACCENT, height=6, width=220)
         self._progress.set(0)
-        self._progress.pack(side="right", padx=(0, 12), pady=9)
+        self._progress.pack(side="right", padx=(0, 12), pady=10)
 
-    # ─────────────────────────────────────────
-    #  Navigation
-    # ─────────────────────────────────────────
+    # ── Navegación ──
     def _show(self, name: str):
         for k, f in self._frames.items():
+            (f.pack if k == name else f.pack_forget)(**({"fill": "both", "expand": True} if k == name else {}))
+        for k, b in self._nav.items():
             if k == name:
-                f.pack(fill="both", expand=True)
+                b.configure(fg_color=C_ACCENT, text_color=C_WHITE)
             else:
-                f.pack_forget()
-        self._active_frame = name
+                b.configure(fg_color="transparent", text_color=C_MUTED)
 
-        for k, btn in self._nav_btns.items():
-            if k == name:
-                btn.configure(fg_color=C_GOLD, text_color=C_DARK2)
-            else:
-                btn.configure(fg_color="transparent", text_color=C_TEXT)
+    def _go_dashboard(self): self._show("dashboard")
+    def _go_analyzer(self):  self._show("analyzer")
+    def _go_valuebets(self): self._show("valuebets")
+    def _go_registro(self):  self._frames["registro"].refresh(); self._show("registro")
+    def _go_settings(self):  self._show("settings")
 
-    def _go_dashboard(self):  self._show("dashboard")
-    def _go_analyzer(self):   self._show("analyzer")
-    def _go_valuebets(self):  self._show("valuebets")
-    def _go_registro(self):   self._frames["registro"].refresh(); self._show("registro")
-    def _go_settings(self):   self._show("settings")
-
-    # ─────────────────────────────────────────
-    #  Data loading (background thread)
-    # ─────────────────────────────────────────
-    def _on_sidebar_league_change(self, name: str):
+    # ── Carga de datos ──
+    def _on_sidebar_league(self, name: str):
         self.engine.set_league(name)
-        self._status_lbl.configure(
-            text=f"Liga cambiada a {name.split('—')[0].strip()} — pulsa Cargar para actualizar"
-        )
+        if self._league_cb.get() != name:
+            self._league_cb.set(name)
+        self._status.configure(text=f"Liga: {name.split('—')[0].strip()} — pulsa Cargar para actualizar")
 
     def _start_load(self):
         if self._loading:
             return
         self._loading = True
         self._load_btn.configure(state="disabled", text="Cargando…")
-        self._dot.configure(text_color=C_GOLD)
+        self._dot.configure(text_color=C_AMBER)
         self._dot_lbl.configure(text=" Cargando…")
         self._progress.set(0)
+        threading.Thread(target=self._worker, daemon=True).start()
 
-        thread = threading.Thread(target=self._load_worker, daemon=True)
-        thread.start()
+    def _worker(self):
+        ok = self.engine.load_league_data(
+            progress_cb=lambda m, p: self.after(0, self._progress_cb, m, p))
+        self.after(0, self._done, ok)
 
-    def _load_worker(self):
-        def progress(msg: str, pct: float):
-            self.after(0, self._update_progress, msg, pct)
-
-        ok = self.engine.load_league_data(progress_cb=progress)
-        self.after(0, self._on_load_done, ok)
-
-    def _update_progress(self, msg: str, pct: float):
-        self._status_lbl.configure(text=msg)
+    def _progress_cb(self, msg, pct):
+        self._status.configure(text=msg)
         self._progress.set(max(0, min(1, pct)))
 
-    def _on_load_done(self, ok: bool):
+    def _done(self, ok: bool):
         self._loading = False
         self._load_btn.configure(state="normal", text="⟳  Cargar / Actualizar")
-
         if ok:
             self._dot.configure(text_color=C_GREEN)
             self._dot_lbl.configure(text=f" {len(self.engine.team_names)} equipos")
@@ -1561,7 +1233,7 @@ class PredictionOSApp(ctk.CTk):
             self._frames["analyzer"].refresh_teams()
         else:
             self._dot.configure(text_color=C_RED)
-            self._dot_lbl.configure(text=" Error de conexión")
+            self._dot_lbl.configure(text=" Error")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1569,17 +1241,13 @@ class PredictionOSApp(ctk.CTk):
 # ═══════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     if not MODULES_OK:
-        # Si faltan módulos, mostrar ventana de error mínima
         root = ctk.CTk()
         root.title("Error de inicio")
-        root.geometry("500x200")
-        ctk.CTkLabel(
-            root,
-            text=f"No se encontraron los módulos requeridos:\n\n{_IMPORT_MSG}\n\n"
-                  "Asegúrate de que config.py, universal_pipeline.py y\n"
-                  "model.py estén en el mismo directorio.",
-            font=("Segoe UI", 12), justify="center", wraplength=460
-        ).pack(expand=True)
+        root.geometry("520x200")
+        ctk.CTkLabel(root, text=f"Faltan módulos:\n\n{_IMPORT_MSG}\n\n"
+                                "Asegúrate de tener config.py, oracle_pipeline.py, model.py "
+                                "y bet_tracker.py en el mismo directorio.",
+                     font=(FONT, 12), justify="center", wraplength=480).pack(expand=True)
         root.mainloop()
         sys.exit(1)
 
